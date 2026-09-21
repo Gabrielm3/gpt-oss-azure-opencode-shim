@@ -43,7 +43,8 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -58,6 +59,13 @@ logger = logging.getLogger("gpt_oss_shim")
 
 # Hostnames a local client uses to reach the shim.
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+# Upstream timeouts in seconds. Non-streamed completions send nothing until
+# generation ends, so the default read timeout leaves room for long outputs.
+_DEFAULT_CONNECT_TIMEOUT = 10.0
+_DEFAULT_READ_TIMEOUT = 600.0
+_WRITE_TIMEOUT = 30.0
+_POOL_TIMEOUT = 10.0
 
 # Headers we never forward upstream; either handled by us or unsafe.
 _STRIPPED_REQUEST_HEADERS = frozenset(
@@ -90,7 +98,7 @@ def _load_config() -> dict[str, Any]:
     ------
     RuntimeError
         If a required variable (``UPSTREAM_URL`` or
-        ``AZURE_FOUNDRY_API_KEY``) is missing.
+        ``AZURE_FOUNDRY_API_KEY``) is missing, or a numeric variable is invalid.
     """
     upstream = os.environ.get("UPSTREAM_URL", "").rstrip("/")
     api_key = os.environ.get("AZURE_FOUNDRY_API_KEY", "").strip()
@@ -106,10 +114,40 @@ def _load_config() -> dict[str, Any]:
         "upstream": upstream,
         "api_key": api_key,
         "host": os.environ.get("SHIM_HOST", "127.0.0.1"),
-        "port": int(os.environ.get("SHIM_PORT", "9526")),
+        "port": int(_env_number("SHIM_PORT", 9526)),
         "log_level": os.environ.get("SHIM_LOG_LEVEL", "info"),
         "allowed_hosts": _LOOPBACK_HOSTS | extra_hosts,
+        "connect_timeout": _env_number("SHIM_CONNECT_TIMEOUT", _DEFAULT_CONNECT_TIMEOUT),
+        "read_timeout": _env_number("SHIM_READ_TIMEOUT", _DEFAULT_READ_TIMEOUT),
     }
+
+
+def _env_number(name: str, default: float) -> float:
+    """Read a positive number from the environment, or fail with a clear error."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise RuntimeError(f"{name} must be a number, got {raw!r}") from None
+    if value <= 0:
+        raise RuntimeError(f"{name} must be greater than zero, got {raw!r}")
+    return value
+
+
+def build_timeout(config: Mapping[str, Any]) -> httpx.Timeout:
+    """Build upstream timeouts.
+
+    ``read`` bounds the gap between received bytes, not the whole response,
+    so a long streamed completion is fine while a stalled upstream is not.
+    """
+    return httpx.Timeout(
+        connect=config.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT),
+        read=config.get("read_timeout", _DEFAULT_READ_TIMEOUT),
+        write=_WRITE_TIMEOUT,
+        pool=_POOL_TIMEOUT,
+    )
 
 
 def _parse_host_list(raw: str) -> frozenset[str]:
@@ -223,7 +261,11 @@ def sanitize_chat_body(raw: bytes) -> tuple[bytes, list[str]]:
     return json.dumps(payload).encode("utf-8"), notes
 
 
-def create_app(config: dict[str, Any] | None = None) -> FastAPI:
+def create_app(
+    config: dict[str, Any] | None = None,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> FastAPI:
     """Application factory.
 
     Parameters
@@ -231,11 +273,23 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
     config
         Optional pre-loaded configuration. If ``None``, the config is
         loaded from environment variables.
+    transport
+        Optional transport for the upstream client, e.g. ``httpx.MockTransport``
+        in tests. Defaults to real network I/O.
     """
     if config is None:
         config = _load_config()
 
-    transport = config.get("transport")
+    # One client for the app's lifetime: connections to Azure are pooled and
+    # reused instead of paying a TCP + TLS handshake on every request.
+    client = httpx.AsyncClient(transport=transport, timeout=build_timeout(config))
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            await client.aclose()
 
     app = FastAPI(
         title="gpt-oss-azure-opencode-shim",
@@ -243,7 +297,9 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=lifespan,
     )
+    app.state.http_client = client
     app.add_middleware(
         LocalOnlyMiddleware,
         allowed_hosts=config.get("allowed_hosts", _LOOPBACK_HOSTS),
@@ -279,10 +335,6 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
         if request.url.query:
             url = f"{url}?{request.url.query}"
 
-        if transport is not None:
-            client = httpx.AsyncClient(transport=transport, timeout=None)
-        else:
-            client = httpx.AsyncClient(timeout=None)
         try:
             upstream_request = client.build_request(
                 request.method,
@@ -292,7 +344,6 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
             )
             upstream_response = await client.send(upstream_request, stream=True)
         except httpx.HTTPError as exc:
-            await client.aclose()
             logger.error("upstream error: %s", exc)
             return JSONResponse(
                 status_code=502,
@@ -309,7 +360,6 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
                         yield chunk
                 finally:
                     await upstream_response.aclose()
-                    await client.aclose()
 
             return StreamingResponse(
                 event_stream(),
@@ -319,7 +369,6 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
 
         content = await upstream_response.aread()
         await upstream_response.aclose()
-        await client.aclose()
         return Response(
             content=content,
             status_code=upstream_response.status_code,

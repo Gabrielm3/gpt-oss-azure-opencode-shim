@@ -35,8 +35,7 @@ def make_app() -> Callable[..., FastAPI]:
     """Build an app whose upstream calls go to ``handler``."""
 
     def _make(handler: Handler = ok_handler, **overrides: Any) -> FastAPI:
-        config = {**FAKE_CONFIG, **overrides, "transport": httpx.MockTransport(handler)}
-        return create_app(config)
+        return create_app({**FAKE_CONFIG, **overrides}, transport=httpx.MockTransport(handler))
 
     return _make
 

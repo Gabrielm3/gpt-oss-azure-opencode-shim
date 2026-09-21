@@ -20,6 +20,8 @@ def env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
         "SHIM_HOST",
         "SHIM_PORT",
         "SHIM_ALLOWED_HOSTS",
+        "SHIM_CONNECT_TIMEOUT",
+        "SHIM_READ_TIMEOUT",
     ):
         monkeypatch.delenv(name, raising=False)
     for name, value in REQUIRED.items():
@@ -56,3 +58,35 @@ def test_allowed_hosts_are_extended_from_env(env: pytest.MonkeyPatch) -> None:
 
     assert {"shim.internal", "10.0.0.5", "localhost"} <= allowed
     assert "" not in allowed
+
+
+def test_timeouts_have_defaults(env: pytest.MonkeyPatch) -> None:
+    config = _load_config()
+
+    assert config["connect_timeout"] == 10.0
+    assert config["read_timeout"] == 600.0
+
+
+def test_timeouts_are_read_from_env(env: pytest.MonkeyPatch) -> None:
+    env.setenv("SHIM_CONNECT_TIMEOUT", "2.5")
+    env.setenv("SHIM_READ_TIMEOUT", "30")
+
+    config = _load_config()
+
+    assert config["connect_timeout"] == 2.5
+    assert config["read_timeout"] == 30.0
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "-1"])
+def test_invalid_timeout_raises(env: pytest.MonkeyPatch, value: str) -> None:
+    env.setenv("SHIM_READ_TIMEOUT", value)
+
+    with pytest.raises(RuntimeError, match="SHIM_READ_TIMEOUT"):
+        _load_config()
+
+
+def test_invalid_port_raises(env: pytest.MonkeyPatch) -> None:
+    env.setenv("SHIM_PORT", "abc")
+
+    with pytest.raises(RuntimeError, match="SHIM_PORT"):
+        _load_config()
