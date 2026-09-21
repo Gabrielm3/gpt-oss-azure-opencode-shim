@@ -1,6 +1,6 @@
 # gpt-oss-azure-opencode-shim
 
-> A lightweight compatibility shim that makes **Azure-hosted GPT-OSS models** work with **OpenCode** by fixing silent API incompatibilities.
+> A small local HTTP shim for **Azure-hosted GPT-OSS models**. It rewrites the forced `tool_choice` values that Azure AI Foundry rejects, keeps the API key out of the client configuration, and forwards everything else to Azure.
 
 [![CI](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/actions/workflows/ci.yml/badge.svg)](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -10,32 +10,42 @@
 
 ## TL;DR
 
-When OpenCode talks to Azure AI Foundry deployments of GPT-OSS, three silent failures can make tool-calling hang forever:
+Azure AI Foundry deployments of `gpt-oss-120b` do not support a forced tool choice:
 
-1. **Azure expects `api-key`**, but OpenAI-compatible SDKs send `Authorization: Bearer`.
-2. **Duplicated `Content-Type`** headers (`application/json,application/json`) get rejected.
-3. **Azure silently ignores forced `tool_choice`**, returning `choices: []` with HTTP 200.
+| Request | Azure response |
+| ------- | -------------- |
+| `tool_choice: {"type": "function", ...}` | HTTP 200 with `choices: []`. No error, no output. |
+| Same request with `stream: true` | HTTP 200 stream with one error event: `DFLASH speculative decoding does not support grammar-constrained decoding yet.` |
+| `tool_choice: "required"` | HTTP 400 `UnsupportedToolUse` |
 
-The shim sits between OpenCode and Azure, applies three small fixes, and forwards everything else unchanged. ~250 lines of Python. Configuration: two environment variables plus one OpenCode provider entry.
+OpenCode sends `tool_choice: "required"` for structured output (`format: {"type": "json_schema"}`), and other clients force a function to get a guaranteed tool call. The shim rewrites every `tool_choice` other than `"auto"` or `"none"` to `"auto"` before the request reaches Azure.
+
+Every claim in this README is backed by real requests recorded in [`docs/PROBLEM.md`](docs/PROBLEM.md).
 
 ---
 
 ## The Problem
 
-You're using an OpenAI-compatible client (OpenCode, in this case) pointed at an Azure AI Foundry deployment of `gpt-oss-120b`. Direct `curl` requests work. But `opencode run` hangs, drops tool calls, or returns empty assistant messages.
+A client that forces a tool against `gpt-oss-120b` on Azure AI Foundry gets one of three results:
 
-```
-OpenCode  ──▶  Azure Foundry  ──▶  silent failure
-```
+- **Forced function, non-streaming:** HTTP 200 with an empty `choices` array and 2 tokens of usage. The client sees an empty assistant turn, and the tool never runs.
+- **Forced function, streaming:** HTTP 200. The only content is an in-band error event, followed by `[DONE]`. Clients that skip error events see an empty turn.
+- **`"required"`:** HTTP 400 `Request included unsupported tool use. tool_choice 'required' is not supported for the model.`
 
-The client never sees an error — just an empty response. Common symptoms:
+The same request with `tool_choice: "auto"` returns native `tool_calls`. The root cause is on the serving side: a forced tool choice needs grammar-constrained decoding, which the deployment's speculative decoding does not support.
 
-- `opencode run "..."` exits with code 0 but prints nothing.
-- Tool calling not working: tool calls (Glob, Read, Bash) never fire.
-- Assistant turns persist with `finish: "stop"` and zero parts.
-- `curl` to the same endpoint returns a valid response.
+---
 
-This is not a network, auth, or model problem. It's a **protocol dialect mismatch** — the client and the server both speak "OpenAI Chat Completions", but disagree on three details.
+## When to Use It
+
+Use the shim when a client **forces** a tool call against this deployment:
+
+- OpenCode structured output (`format: {"type": "json_schema"}` in the `opencode serve` API or SDK), which sends `"required"`.
+- AI SDK `toolChoice: { type: "tool", toolName }`, OpenAI SDK `tool_choice={"type": "function", ...}`, or agents that force a final tool.
+
+You do not need it for plain `opencode run`. OpenCode 1.18.31 sends `tool_choice: "auto"` for normal agent turns, and those work against Azure directly with the `@ai-sdk/openai-compatible` provider.
+
+**Limit:** `"auto"` lets the model choose. The shim turns a rejected request into a completed one, but the model can still answer with text instead of the tool call. In testing, OpenCode structured output through the shim completed, and `gpt-oss-120b` answered in plain text, so OpenCode reported `StructuredOutputError`. See [`docs/PROBLEM.md`](docs/PROBLEM.md#3-end-to-end-results-with-opencode).
 
 ---
 
@@ -90,13 +100,13 @@ Add to `~/.config/opencode/opencode.json` (or merge with existing — see [`exam
 }
 ```
 
-`opencode run -m azure-gpt-oss/gpt-oss-120b "..."` now completes tool calls.
+The `apiKey` value is a placeholder. The shim replaces it with the real key.
 
 ---
 
 ## Verify the Fix
 
-[`examples/curl-tests.sh`](examples/curl-tests.sh) reproduces the bug and confirms the fix in one script:
+[`examples/curl-tests.sh`](examples/curl-tests.sh) reproduces each Azure response and checks the shim against the real deployment:
 
 ```bash
 export UPSTREAM_URL=https://YOUR_RESOURCE.services.ai.azure.com/openai
@@ -107,15 +117,23 @@ export AZURE_FOUNDRY_API_KEY=your-key-here
 Expected output:
 
 ```
-=== 1. Direct Azure — forced tool_choice (expected: choices=[]) ===
-[PASS] reproduced: Azure returned choices=[] silently
+=== 1. Direct Azure — forced function tool_choice (expected: HTTP 200, choices=[]) ===
+[PASS] reproduced: HTTP 200 with choices=[]
 
-=== 2. Direct Azure — tool_choice=auto (expected: tool_calls) ===
+=== 2. Direct Azure — tool_choice="required" (expected: HTTP 400 UnsupportedToolUse) ===
+[PASS] reproduced: HTTP 400 UnsupportedToolUse
+
+=== 3. Direct Azure — tool_choice="auto" (expected: tool_calls) ===
 [PASS] Azure emits native tool_calls with tool_choice=auto
 
-=== 3. Via shim — forced tool_choice is rewritten to auto ===
-[PASS] shim rewrote forced tool_choice; native tool_calls received
+=== 4. Via shim — forced function and "required" are rewritten to auto ===
+[PASS] tool_choice={"type":"function","function":{"name":"get_files"}} -> native tool_calls
+[PASS] tool_choice="required" -> native tool_calls
+
+All checks passed.
 ```
+
+The script exits with a non-zero status if any check fails, including authentication errors.
 
 ---
 
@@ -123,68 +141,66 @@ Expected output:
 
 ```
 ┌──────────┐         ┌────────────────┐         ┌──────────────────┐
-│ OpenCode │ ──────▶ │      shim      │ ──────▶ │  Azure Foundry   │
-│  :local  │         │ 127.0.0.1:9526 │         │  gpt-oss-120b    │
+│  client  │ ──────▶ │      shim      │ ──────▶ │  Azure Foundry   │
+│ OpenCode │         │ 127.0.0.1:9526 │         │  gpt-oss-120b    │
 └──────────┘         └────────────────┘         └──────────────────┘
                             │
-                            ├── inject api-key + Bearer
-                            ├── strip duplicate Content-Type
-                            └── rewrite forced tool_choice → "auto"
+                            ├── reject browser and non-local requests
+                            ├── rewrite forced tool_choice → "auto"
+                            ├── inject the API key
+                            └── relay response, headers, and SSE stream
 ```
 
-The shim is a transparent FastAPI proxy. On every request, it applies three fixes:
+### 1. Tool choice rewriting
 
-### 1. Authentication
+For `POST .../chat/completions`, any `tool_choice` other than `"auto"` or `"none"` becomes `"auto"`. Each rewrite is logged:
 
-Azure AI Foundry uses the `api-key` header. OpenAI-compatible SDKs use `Authorization: Bearer`. The shim sends **both**:
-
-```python
-{
-    "api-key": AZURE_FOUNDRY_API_KEY,
-    "Authorization": f"Bearer {AZURE_FOUNDRY_API_KEY}",
-}
+```text
+INFO gpt_oss_shim: sanitized request: tool_choice='required' -> 'auto'
 ```
 
-### 2. Header hygiene
+### 2. Credentials
 
-If the client sets `Content-Type` and the shim also sets it, upstream receives `application/json,application/json` and rejects the request. The shim strips client-provided `Content-Type`, `Accept-Encoding`, `Authorization`, and hop-by-hop headers before forwarding.
+The client sends a placeholder key. The shim sends the real key as both `api-key` and `Authorization: Bearer` (Azure accepts either). The key lives only in the shim's environment file, which `install.sh` creates with mode `600`.
 
-### 3. Tool choice rewriting
+### 3. Header hygiene
 
-This is the core fix. Azure GPT-OSS supports only `tool_choice: "auto"` and `"none"`. Any other value — a dict like `{"type":"function",...}` or the string `"required"` — triggers **silent rejection**:
+The shim sets its own `Content-Type` and drops the client's copy, plus `Authorization`, `Accept-Encoding`, and hop-by-hop headers. Azure rejects a duplicated `Content-Type` (`application/json,application/json`) with HTTP 400.
 
-```http
-HTTP/1.1 200 OK
-{ "choices": [] }   ← empty
-```
+### 4. Upstream failures
 
-The client interprets this as "the model decided not to call anything" and hangs. The shim rewrites every unsafe `tool_choice` to `"auto"`:
-
-```python
-choice = payload.get("tool_choice")
-if choice is not None and not (isinstance(choice, str) and choice in {"auto", "none"}):
-    payload["tool_choice"] = "auto"
-```
+- One shared HTTP client keeps connections to Azure open between requests.
+- Connect timeout 10 s, read timeout 600 s between bytes. A stalled upstream returns HTTP 504 instead of hanging.
+- Transport errors return HTTP 502 with an OpenAI-style `error` body.
+- If a stream breaks mid-way, the shim ends it with a `data: {"error": ...}` event, so the client reports an error instead of a silent, truncated answer.
+- Azure response headers such as `retry-after`, `x-ratelimit-*`, and `x-request-id` reach the client.
 
 ---
 
-## Why This Exists
+## Security
 
-While integrating GPT-OSS on Azure with OpenCode for agentic coding, tool calling would hang indefinitely. `curl` worked, but the CLI didn't. Debugging revealed three stacked protocol mismatches — none of them documented, all of them silent.
+The shim adds a real API key to every request it forwards and has no inbound authentication. It is built for a single local user:
 
-The shim isolates the workaround in one place, with no changes to OpenCode or the Azure SDK. The root cause was isolated by inspecting raw SSE streams, OpenCode's SQLite session state, and changing one request field at a time.
+- It binds to `127.0.0.1` by default and logs a warning if `SHIM_HOST` is not a loopback address.
+- It returns HTTP 403 for requests with an `Origin` header or a `Sec-Fetch-Site` value other than `none`. Web pages cannot use the shim through cross-site requests.
+- It returns HTTP 403 if the `Host` header is not `localhost`, `127.0.0.1`, `::1`, or a name in `SHIM_ALLOWED_HOSTS`. This blocks DNS rebinding.
+
+Do not expose the shim on a network interface. The `Host` check does not stop a client on the network that sends `Host: localhost`.
 
 ---
 
 ## Configuration Reference
 
-| Variable                | Required | Default     | Description                       |
-| ----------------------- | -------- | ----------- | --------------------------------- |
-| `UPSTREAM_URL`          | yes      | —           | Azure Foundry base URL (no `/v1`) |
-| `AZURE_FOUNDRY_API_KEY` | yes      | —           | Azure resource key                |
-| `SHIM_HOST`             | no       | `127.0.0.1` | Bind address                      |
-| `SHIM_PORT`             | no       | `9526`      | Bind port                         |
-| `SHIM_LOG_LEVEL`        | no       | `info`      | uvicorn log level                 |
+| Variable                | Required | Default     | Description                                          |
+| ----------------------- | -------- | ----------- | ---------------------------------------------------- |
+| `UPSTREAM_URL`          | yes      | —           | Azure Foundry base URL (no `/v1`)                    |
+| `AZURE_FOUNDRY_API_KEY` | yes      | —           | Azure resource key                                   |
+| `SHIM_HOST`             | no       | `127.0.0.1` | Bind address                                         |
+| `SHIM_PORT`             | no       | `9526`      | Bind port                                            |
+| `SHIM_LOG_LEVEL`        | no       | `info`      | uvicorn log level                                    |
+| `SHIM_ALLOWED_HOSTS`    | no       | —           | Extra `Host` names to accept, comma-separated        |
+| `SHIM_CONNECT_TIMEOUT`  | no       | `10`        | Seconds to open a connection to Azure                |
+| `SHIM_READ_TIMEOUT`     | no       | `600`       | Maximum seconds between bytes received from Azure    |
 
 ---
 
@@ -193,13 +209,13 @@ The shim isolates the workaround in one place, with no changes to OpenCode or th
 | Component     | Tested Version                    |
 | ------------- | --------------------------------- |
 | Python        | 3.10, 3.11, 3.12, 3.13            |
-| OpenCode      | 1.18.x                            |
+| OpenCode      | 1.18.31                           |
 | Azure GPT-OSS | `gpt-oss-120b` (Chat Completions) |
 | OS            | Linux (systemd user service)      |
 
 Likely applies to `gpt-oss-20b` as well (untested).
 
-**Not a proxy for translating between different protocols.** The shim assumes both sides speak OpenAI Chat Completions. It only fixes dialect mismatches.
+**Not a protocol translator.** The shim assumes both sides speak OpenAI Chat Completions. Use the `@ai-sdk/openai-compatible` provider in OpenCode. The `@ai-sdk/openai` package failed against the same deployment for reasons unrelated to `tool_choice`.
 
 **Does not fix OpenCode's empty-assistant-materialization bug** when the model returns only reasoning. That's an upstream issue.
 
@@ -212,15 +228,16 @@ git clone https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim.git
 cd gpt-oss-azure-opencode-shim
 python3 -m venv .venv
 ./.venv/bin/pip install -e ".[dev]"
-./.venv/bin/pytest -v        # 16 tests
+./.venv/bin/pytest -v
 ./.venv/bin/ruff check src tests
+./.venv/bin/ruff format --check src tests
 ```
 
 ---
 
 ## Contributing
 
-Issues and PRs are welcome. Run `pytest` and `ruff check src tests` before opening a PR.
+Issues and PRs are welcome. Run `pytest`, `ruff check src tests`, and `ruff format --check src tests` before opening a PR.
 
 ---
 

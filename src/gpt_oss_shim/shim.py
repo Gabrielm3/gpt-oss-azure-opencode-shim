@@ -1,22 +1,23 @@
 """GPT-OSS on Azure + OpenCode compatibility shim.
 
-A lightweight HTTP shim that sits between the OpenCode CLI and an
-Azure AI Foundry deployment of an OpenAI-compatible model (e.g. GPT-OSS).
-It fixes three silent incompatibilities that cause OpenCode to hang:
+A local HTTP shim between an OpenAI-compatible client (e.g. OpenCode) and an
+Azure AI Foundry deployment of GPT-OSS. See ``docs/PROBLEM.md`` for the
+recorded Azure behavior behind each fix.
 
-1. Missing ``api-key`` header. The OpenAI-compatible SDK used by OpenCode
-   sends ``Authorization: Bearer``, but Azure AI Foundry expects ``api-key``.
-   The shim injects both.
+1. Forced ``tool_choice``. Azure answers a forced function with HTTP 200 and
+   ``choices: []`` (or an in-band error event when streaming), and answers
+   ``"required"`` with HTTP 400 ``UnsupportedToolUse``. The shim rewrites any
+   value other than ``"auto"``/``"none"`` to ``"auto"``.
 
-2. Duplicated ``Content-Type`` header. If the client also sets
-   ``Content-Type``, the upstream receives ``application/json,application/json``
-   and rejects the request. The shim strips client-provided content-type
-   before forwarding.
+2. Credentials. The client sends a placeholder key; the shim sends the real
+   key as ``api-key`` and ``Authorization: Bearer``.
 
-3. Unsupported ``tool_choice`` values. Azure silently ignores forced
-   ``tool_choice`` (object or ``"required"``) and returns an empty
-   ``choices: []`` array, which causes OpenCode to hang. The shim rewrites
-   any non-``auto``/``none`` value to ``"auto"`` before forwarding.
+3. Headers. The shim sets its own ``Content-Type`` and drops the client's, so
+   Azure never receives ``application/json,application/json`` (HTTP 400).
+
+4. Local-only access. Requests from browsers (``Origin``, ``Sec-Fetch-Site``)
+   or with a non-local ``Host`` get HTTP 403, because every forwarded request
+   carries the real API key.
 
 Environment variables
 ---------------------
@@ -34,6 +35,10 @@ SHIM_LOG_LEVEL
 SHIM_ALLOWED_HOSTS
     Comma-separated hostnames accepted in the ``Host`` header, in addition
     to ``localhost``, ``127.0.0.1`` and ``::1`` (default: empty).
+SHIM_CONNECT_TIMEOUT
+    Seconds to open a connection to the upstream (default: ``10``).
+SHIM_READ_TIMEOUT
+    Maximum seconds between bytes received from the upstream (default: ``600``).
 """
 
 from __future__ import annotations
