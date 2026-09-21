@@ -10,11 +10,13 @@ def _dump(payload: dict) -> bytes:
 
 
 def test_forced_function_choice_is_rewritten_to_auto() -> None:
-    body = _dump({
-        "model": "gpt-oss-120b",
-        "messages": [{"role": "user", "content": "hi"}],
-        "tool_choice": {"type": "function", "function": {"name": "glob"}},
-    })
+    body = _dump(
+        {
+            "model": "gpt-oss-120b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": {"type": "function", "function": {"name": "glob"}},
+        }
+    )
     out, notes = sanitize_chat_body(body)
 
     assert json.loads(out)["tool_choice"] == "auto"

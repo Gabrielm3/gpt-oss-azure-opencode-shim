@@ -29,7 +29,9 @@ jobs:
           python -m pip install -e ".[dev]"
 
       - name: Lint (ruff)
-        run: ruff check src tests
+        run: |
+          ruff check src tests
+          ruff format --check src tests
 
       - name: Test (pytest)
         run: pytest -v
