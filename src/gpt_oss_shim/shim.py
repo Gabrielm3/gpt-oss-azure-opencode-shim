@@ -50,22 +50,24 @@ __version__ = "0.1.0"
 logger = logging.getLogger("gpt_oss_shim")
 
 # Headers we never forward upstream; either handled by us or unsafe.
-_STRIPPED_REQUEST_HEADERS = frozenset({
-    "host",
-    "content-length",
-    "content-type",
-    "authorization",
-    "accept-encoding",
-    "api-key",
-    "connection",
-    "transfer-encoding",
-    "keep-alive",
-    "proxy-authorization",
-    "proxy-authenticate",
-    "te",
-    "trailer",
-    "upgrade",
-})
+_STRIPPED_REQUEST_HEADERS = frozenset(
+    {
+        "host",
+        "content-length",
+        "content-type",
+        "authorization",
+        "accept-encoding",
+        "api-key",
+        "connection",
+        "transfer-encoding",
+        "keep-alive",
+        "proxy-authorization",
+        "proxy-authenticate",
+        "te",
+        "trailer",
+        "upgrade",
+    }
+)
 
 # tool_choice values that Azure accepts without issue.
 _SAFE_TOOL_CHOICES = frozenset({"auto", "none"})
@@ -185,9 +187,7 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
                 logger.info("sanitized request: %s", note)
 
         forward_headers = {
-            k: v
-            for k, v in request.headers.items()
-            if k.lower() not in _STRIPPED_REQUEST_HEADERS
+            k: v for k, v in request.headers.items() if k.lower() not in _STRIPPED_REQUEST_HEADERS
         }
         forward_headers.update(auth_headers)
 
@@ -218,6 +218,7 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
         content_type = upstream_response.headers.get("content-type", "")
 
         if "text/event-stream" in content_type:
+
             async def event_stream():
                 try:
                     async for chunk in upstream_response.aiter_raw():
