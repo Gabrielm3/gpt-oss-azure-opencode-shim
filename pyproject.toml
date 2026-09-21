@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpt-oss-azure-opencode-shim"
+version = "0.1.0"
+description = "Compatibility shim that fixes silent API failures when using Azure-hosted GPT-OSS models with OpenCode."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "gpt-oss-azure-opencode-shim contributors" }
+]
+keywords = [
+    "opencode",
+    "azure-ai-foundry",
+    "gpt-oss",
+    "llm",
+    "ai-agents",
+    "compatibility-shim",
+    "openai-compatible",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Internet :: Proxy Servers",
+]
+dependencies = [
+    "fastapi>=0.110",
+    "httpx>=0.27",
+    "uvicorn[standard]>=0.29",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+    "ruff>=0.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim"
+Issues = "https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/issues"
+Source = "https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim"
+
+[project.scripts]
+gpt-oss-azure-opencode-shim = "gpt_oss_shim.shim:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]

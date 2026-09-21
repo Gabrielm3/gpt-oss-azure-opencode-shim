@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "azure-gpt-oss": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Azure GPT-OSS via shim",
+      "options": {
+        "baseURL": "http://127.0.0.1:9526/v1",
+        "apiKey": "shim"
+      },
+      "models": {
+        "gpt-oss-120b": {
+          "name": "GPT-OSS 120B",
+          "reasoning": false,
+          "limit": {
+            "context": 131072,
+            "output": 32768
+          }
+        }
+      }
+    }
+  }
+}
