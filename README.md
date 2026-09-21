@@ -215,7 +215,7 @@ Do not expose the shim on a network interface. The `Host` check does not stop a 
 
 Likely applies to `gpt-oss-20b` as well (untested).
 
-**Not a protocol translator.** The shim assumes both sides speak OpenAI Chat Completions. Use the `@ai-sdk/openai-compatible` provider in OpenCode. The `@ai-sdk/openai` package failed against the same deployment for reasons unrelated to `tool_choice`.
+**Not a protocol translator.** The shim assumes both sides speak OpenAI Chat Completions. Use the `@ai-sdk/openai-compatible` provider in OpenCode. The `@ai-sdk/openai` package failed against the same deployment with `Invalid parameter: the model does not support one or more of the provided input parameters`, which this shim does not address.
 
 **Does not fix OpenCode's empty-assistant-materialization bug** when the model returns only reasoning. That's an upstream issue.
 

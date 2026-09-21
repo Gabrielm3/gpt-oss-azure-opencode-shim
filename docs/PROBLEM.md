@@ -106,10 +106,10 @@ Two conclusions:
    still answer without calling `StructuredOutput`. The shim cannot force
    schema-conforming output.
 
-A separate note: the `@ai-sdk/openai` provider package failed against the
-same deployment with `Invalid parameter: the model does not support one or
-more of the provided input parameters`, independent of `tool_choice`. The
-shim does not address this. Use `@ai-sdk/openai-compatible`.
+A separate note: `opencode run` with the `@ai-sdk/openai` provider package
+failed against the same deployment with `Invalid parameter: the model does
+not support one or more of the provided input parameters`. The cause was not
+isolated, and the shim does not address it. Use `@ai-sdk/openai-compatible`.
 
 ## 4. Requests through the shim
 
