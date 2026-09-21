@@ -58,7 +58,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 logger = logging.getLogger("gpt_oss_shim")
 
