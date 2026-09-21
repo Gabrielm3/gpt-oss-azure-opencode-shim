@@ -31,23 +31,33 @@ SHIM_PORT
     Bind port (default: ``9526``).
 SHIM_LOG_LEVEL
     Uvicorn log level (default: ``info``).
+SHIM_ALLOWED_HOSTS
+    Comma-separated hostnames accepted in the ``Host`` header, in addition
+    to ``localhost``, ``127.0.0.1`` and ``::1`` (default: empty).
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 __version__ = "0.1.0"
 
 logger = logging.getLogger("gpt_oss_shim")
+
+# Hostnames a local client uses to reach the shim.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 # Headers we never forward upstream; either handled by us or unsafe.
 _STRIPPED_REQUEST_HEADERS = frozenset(
@@ -90,13 +100,83 @@ def _load_config() -> dict[str, Any]:
     if not api_key:
         raise RuntimeError("AZURE_FOUNDRY_API_KEY environment variable is required")
 
+    extra_hosts = _parse_host_list(os.environ.get("SHIM_ALLOWED_HOSTS", ""))
+
     return {
         "upstream": upstream,
         "api_key": api_key,
         "host": os.environ.get("SHIM_HOST", "127.0.0.1"),
         "port": int(os.environ.get("SHIM_PORT", "9526")),
         "log_level": os.environ.get("SHIM_LOG_LEVEL", "info"),
+        "allowed_hosts": _LOOPBACK_HOSTS | extra_hosts,
     }
+
+
+def _parse_host_list(raw: str) -> frozenset[str]:
+    """Parse a comma-separated hostname list into lowercase names."""
+    return frozenset(name.strip().lower() for name in raw.split(",") if name.strip())
+
+
+def is_loopback_bind(host: str) -> bool:
+    """Return ``True`` if binding to ``host`` keeps the shim off the network."""
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _hostname(host_header: str) -> str:
+    """Return the hostname of a ``Host`` header, without port or IPv6 brackets."""
+    host = host_header.strip().lower()
+    if host.startswith("["):
+        return host[1:].split("]", 1)[0]
+    return host.split(":", 1)[0]
+
+
+def rejection_reason(headers: Mapping[str, str], allowed_hosts: frozenset[str]) -> str | None:
+    """Return why a request must be refused, or ``None`` if it may pass.
+
+    The shim adds a real API key to every upstream call, so it only serves
+    local, non-browser clients:
+
+    - Browsers send ``Origin`` on cross-origin POSTs, including CORS "simple"
+      requests that skip the preflight.
+    - Browsers send ``Sec-Fetch-Site`` on every request; only ``none`` (the
+      user typed the URL) is accepted.
+    - A ``Host`` outside ``allowed_hosts`` means DNS rebinding or a request
+      that was not addressed to this machine.
+    """
+    if "origin" in headers:
+        return "requests with an Origin header are not accepted"
+    fetch_site = headers.get("sec-fetch-site")
+    if fetch_site is not None and fetch_site != "none":
+        return f"browser requests with Sec-Fetch-Site={fetch_site!r} are not accepted"
+    if _hostname(headers.get("host", "")) not in allowed_hosts:
+        return "Host header is not an allowed local hostname"
+    return None
+
+
+class LocalOnlyMiddleware:
+    """Reject browser-originated and non-local requests before any routing."""
+
+    def __init__(self, app: ASGIApp, allowed_hosts: frozenset[str]) -> None:
+        self.app = app
+        self.allowed_hosts = allowed_hosts
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            reason = rejection_reason(Headers(scope=scope), self.allowed_hosts)
+            if reason is not None:
+                logger.warning("rejected %s %s: %s", scope["method"], scope["path"], reason)
+                response = JSONResponse(
+                    status_code=403,
+                    content={"error": {"message": reason, "type": "forbidden"}},
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 def build_upstream_headers(config: dict[str, Any]) -> dict[str, str]:
@@ -163,6 +243,10 @@ def create_app(config: dict[str, Any] | None = None) -> FastAPI:
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+    )
+    app.add_middleware(
+        LocalOnlyMiddleware,
+        allowed_hosts=config.get("allowed_hosts", _LOOPBACK_HOSTS),
     )
 
     upstream = config["upstream"]
@@ -257,6 +341,13 @@ def main() -> int:
     except RuntimeError as exc:
         logger.error("%s", exc)
         return 1
+
+    if not is_loopback_bind(config["host"]):
+        logger.warning(
+            "SHIM_HOST=%s is reachable from the network. The shim has no inbound "
+            "authentication and adds the Azure API key to every request it forwards.",
+            config["host"],
+        )
 
     import uvicorn
 
