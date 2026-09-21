@@ -67,15 +67,9 @@ _DEFAULT_READ_TIMEOUT = 600.0
 _WRITE_TIMEOUT = 30.0
 _POOL_TIMEOUT = 10.0
 
-# Headers we never forward upstream; either handled by us or unsafe.
-_STRIPPED_REQUEST_HEADERS = frozenset(
+# Hop-by-hop headers (RFC 9110 section 7.6.1) apply to one connection only.
+_HOP_BY_HOP_HEADERS = frozenset(
     {
-        "host",
-        "content-length",
-        "content-type",
-        "authorization",
-        "accept-encoding",
-        "api-key",
         "connection",
         "transfer-encoding",
         "keep-alive",
@@ -86,6 +80,20 @@ _STRIPPED_REQUEST_HEADERS = frozenset(
         "upgrade",
     }
 )
+
+# Headers we never forward upstream; either handled by us or unsafe.
+_STRIPPED_REQUEST_HEADERS = _HOP_BY_HOP_HEADERS | {
+    "host",
+    "content-length",
+    "content-type",
+    "authorization",
+    "accept-encoding",
+    "api-key",
+}
+
+# Headers we never copy back to the client. httpx decodes the body, so the
+# upstream length and encoding no longer describe what the client receives.
+_STRIPPED_RESPONSE_HEADERS = _HOP_BY_HOP_HEADERS | {"content-length", "content-encoding"}
 
 # tool_choice values that Azure accepts without issue.
 _SAFE_TOOL_CHOICES = frozenset({"auto", "none"})
@@ -344,38 +352,78 @@ def create_app(
             )
             upstream_response = await client.send(upstream_request, stream=True)
         except httpx.HTTPError as exc:
-            logger.error("upstream error: %s", exc)
-            return JSONResponse(
-                status_code=502,
-                content={"error": {"message": f"upstream error: {exc}"}},
-            )
+            return upstream_error_response(exc)
 
-        content_type = upstream_response.headers.get("content-type", "")
+        headers = forwardable_response_headers(upstream_response.headers)
 
-        if "text/event-stream" in content_type:
-
-            async def event_stream():
-                try:
-                    async for chunk in upstream_response.aiter_raw():
-                        yield chunk
-                finally:
-                    await upstream_response.aclose()
-
+        if "text/event-stream" in upstream_response.headers.get("content-type", ""):
             return StreamingResponse(
-                event_stream(),
+                relay_sse(upstream_response),
                 status_code=upstream_response.status_code,
-                media_type="text/event-stream",
+                headers=headers,
             )
 
-        content = await upstream_response.aread()
-        await upstream_response.aclose()
+        try:
+            content = await upstream_response.aread()
+        except httpx.HTTPError as exc:
+            return upstream_error_response(exc)
+        finally:
+            await upstream_response.aclose()
+
         return Response(
             content=content,
             status_code=upstream_response.status_code,
-            media_type=content_type or "application/json",
+            headers=headers,
+            media_type="application/json",  # used only if upstream sent no content-type
         )
 
     return app
+
+
+def _upstream_error_payload(exc: httpx.HTTPError) -> tuple[int, dict[str, Any]]:
+    """Map an httpx failure to an HTTP status and an OpenAI-style error body."""
+    if isinstance(exc, httpx.TimeoutException):
+        status, kind = 504, "upstream_timeout"
+    else:
+        status, kind = 502, "upstream_error"
+    message = f"{kind.replace('_', ' ')}: {type(exc).__name__}"
+    return status, {"error": {"message": message, "type": kind}}
+
+
+def upstream_error_response(exc: httpx.HTTPError) -> JSONResponse:
+    """Log an upstream failure and turn it into a 502 or 504 response."""
+    logger.error("upstream request failed: %s: %s", type(exc).__name__, exc)
+    status, payload = _upstream_error_payload(exc)
+    return JSONResponse(status_code=status, content=payload)
+
+
+def forwardable_response_headers(headers: httpx.Headers) -> dict[str, str]:
+    """Upstream response headers that still hold after the shim relays the body.
+
+    Keeps ``retry-after``, ``x-ratelimit-*`` and request IDs, which clients
+    need for backoff and for correlating failures with Azure support.
+    """
+    return {k: v for k, v in headers.items() if k.lower() not in _STRIPPED_RESPONSE_HEADERS}
+
+
+async def relay_sse(response: httpx.Response) -> AsyncIterator[bytes]:
+    """Relay an upstream SSE body, ending with an error event if it breaks.
+
+    The status line and headers are already sent when a stream breaks, so the
+    failure can only be reported in-band. OpenAI-compatible clients (the
+    OpenAI SDK, the AI SDK used by OpenCode) surface a ``data: {"error": ...}``
+    event as an error instead of treating the truncated stream as complete.
+    """
+    try:
+        async for chunk in response.aiter_bytes():
+            yield chunk
+    except httpx.HTTPError as exc:
+        logger.error("upstream stream interrupted: %s: %s", type(exc).__name__, exc)
+        _, payload = _upstream_error_payload(exc)
+        # The leading blank line ends any event that was cut off mid-way.
+        yield b"\n\ndata: " + json.dumps(payload).encode() + b"\n\n"
+    finally:
+        await response.aclose()
 
 
 def main() -> int:
