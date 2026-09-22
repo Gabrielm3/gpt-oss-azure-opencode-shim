@@ -55,7 +55,7 @@ After=network.target
 [Service]
 Type=simple
 EnvironmentFile=%h/.config/gpt-oss-azure-opencode-shim.env
-ExecStart=$INSTALL_DIR/.venv/bin/python -m gpt_oss_shim.shim
+ExecStart=$INSTALL_DIR/.venv/bin/gpt-oss-azure-opencode-shim
 WorkingDirectory=$INSTALL_DIR
 Restart=always
 RestartSec=3
@@ -71,7 +71,7 @@ UNITEOF
 else
     info "systemd --user not available; run manually:"
     info "  set -a; source $ENV_FILE; set +a"
-    info "  $INSTALL_DIR/.venv/bin/python -m gpt_oss_shim.shim"
+    info "  $INSTALL_DIR/.venv/bin/gpt-oss-azure-opencode-shim"
 fi
 
 echo
