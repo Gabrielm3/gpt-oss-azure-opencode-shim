@@ -1,0 +1,77 @@
+{
+  "id": "prose-answer",
+  "description": "Final-answer step answered in Markdown prose; no JSON to convert, left unchanged",
+  "source": {
+    "model": "gpt-oss-120b",
+    "ts": "2026-09-22T13:41:32+00:00",
+    "mode": "on"
+  },
+  "stream": false,
+  "tool_choice": "required",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "glob",
+        "description": "Find files by glob pattern.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read",
+        "description": "Read a file.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filePath": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "filePath"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "StructuredOutput",
+        "description": "Use this tool to return your final response in the requested structured format.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "files"
+          ]
+        }
+      }
+    }
+  ],
+  "response": "{\"id\":\"3f970ed8dcfb416d810027dabf3080ad\",\"model\":\"gpt-oss-120b\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"The markdown files in this repository are:\\n\\n- `/repo/README.md`\\n- `/repo/docs/PROBLEM.md`\",\"reasoning_content\":\"We have the list of markdown files: /repo/README.md and /repo/docs/PROBLEM.md. The user asks \\\"Which markdown files are in this directory?\\\" Likely they want the list. The response should likely be a list of file paths. There's no request for structured output, but could just give answer. Probably just answer with those file names.\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":236,\"completion_tokens\":107,\"total_tokens\":343,\"audio_prompt_tokens\":0},\"created\":1790084490,\"object\":\"chat.completion\",\"prompt_filter_results\":null}",
+  "expected": {
+    "outcome": "failed"
+  }
+}

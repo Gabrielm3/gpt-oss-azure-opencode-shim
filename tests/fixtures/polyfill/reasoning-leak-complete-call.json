@@ -1,0 +1,89 @@
+{
+  "id": "reasoning-leak-complete-call",
+  "description": "Empty content; the arguments of a read call end the reasoning as complete JSON; rescued as that call",
+  "source": {
+    "model": "gpt-oss-120b",
+    "ts": "2026-09-22T13:42:00+00:00",
+    "mode": "on"
+  },
+  "stream": false,
+  "tool_choice": "required",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "glob",
+        "description": "Find files by glob pattern.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read",
+        "description": "Read a file.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filePath": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "filePath"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "StructuredOutput",
+        "description": "Use this tool to return your final response in the requested structured format.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dependencies": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          },
+          "required": [
+            "dependencies"
+          ]
+        }
+      }
+    }
+  ],
+  "response": "{\"id\":\"9218e1f0913b44ba9db2b50a48fe1392\",\"model\":\"gpt-oss-120b\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"We need list runtime dependencies. The pyproject includes dependencies variable. Also check poetry lock? Let's view pyproject fully.{\\\"filePath\\\": \\\"pyproject.toml\\\"}\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":262,\"completion_tokens\":49,\"total_tokens\":311,\"audio_prompt_tokens\":0},\"created\":1790084522,\"object\":\"chat.completion\",\"prompt_filter_results\":null}",
+  "expected": {
+    "outcome": "rescued",
+    "tool": "read"
+  }
+}
