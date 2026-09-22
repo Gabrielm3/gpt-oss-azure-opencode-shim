@@ -30,8 +30,8 @@ jobs:
 
       - name: Lint (ruff)
         run: |
-          ruff check src tests
-          ruff format --check src tests
+          ruff check src tests evals
+          ruff format --check src tests evals
 
       - name: Test (pytest)
         run: pytest -v
