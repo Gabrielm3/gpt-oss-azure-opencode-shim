@@ -27,7 +27,7 @@ Measured against the real deployment (see [Evaluation](#evaluation)):
 | | Rewrite only (v0.1.1) | Rewrite + polyfill (v0.2.0) |
 | --- | --- | --- |
 | OpenCode structured output (10 runs) | 0/10 | **9/10** |
-| Stalled turns on forced requests (no tool call at all) | 7/59 (12%) | **2/56 (4%)** |
+| Stalled turns on forced requests (no tool call at all; upstream HTTP 500s excluded) | 7/59 (12%) | **2/56 (4%)** |
 
 Every claim in this README is backed by real requests recorded in [`docs/PROBLEM.md`](docs/PROBLEM.md).
 
