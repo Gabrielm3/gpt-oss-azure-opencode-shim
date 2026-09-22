@@ -22,6 +22,7 @@ def env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
         "SHIM_ALLOWED_HOSTS",
         "SHIM_CONNECT_TIMEOUT",
         "SHIM_READ_TIMEOUT",
+        "SHIM_TOOL_POLYFILL",
     ):
         monkeypatch.delenv(name, raising=False)
     for name, value in REQUIRED.items():
@@ -89,4 +90,24 @@ def test_invalid_port_raises(env: pytest.MonkeyPatch) -> None:
     env.setenv("SHIM_PORT", "abc")
 
     with pytest.raises(RuntimeError, match="SHIM_PORT"):
+        _load_config()
+
+
+def test_tool_polyfill_is_on_by_default(env: pytest.MonkeyPatch) -> None:
+    assert _load_config()["tool_polyfill"] is True
+
+
+@pytest.mark.parametrize(("value", "expected"), [("off", False), ("0", False), ("ON", True)])
+def test_tool_polyfill_flag_is_read_from_env(
+    env: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    env.setenv("SHIM_TOOL_POLYFILL", value)
+
+    assert _load_config()["tool_polyfill"] is expected
+
+
+def test_invalid_tool_polyfill_flag_raises(env: pytest.MonkeyPatch) -> None:
+    env.setenv("SHIM_TOOL_POLYFILL", "maybe")
+
+    with pytest.raises(RuntimeError, match="SHIM_TOOL_POLYFILL"):
         _load_config()

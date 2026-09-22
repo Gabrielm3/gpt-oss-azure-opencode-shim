@@ -19,6 +19,14 @@ recorded Azure behavior behind each fix.
    or with a non-local ``Host`` get HTTP 403, because every forwarded request
    carries the real API key.
 
+5. Tool-call polyfill. After the rewrite, the model often returns the answer
+   as JSON text instead of calling the required tool. For forced requests the
+   shim buffers the answer and, if the text matches exactly one candidate
+   tool schema, returns it as that tool call (see ``polyfill.py``).
+
+6. Outcomes. Every forwarded request gets an ``x-shim-outcome`` header and a
+   count in ``/metrics`` (Prometheus); a ``choices: []`` answer becomes 502.
+
 Environment variables
 ---------------------
 UPSTREAM_URL
@@ -39,6 +47,9 @@ SHIM_CONNECT_TIMEOUT
     Seconds to open a connection to the upstream (default: ``10``).
 SHIM_READ_TIMEOUT
     Maximum seconds between bytes received from the upstream (default: ``600``).
+SHIM_TOOL_POLYFILL
+    ``on`` or ``off``: convert JSON text answers to forced requests into tool
+    calls (default: ``on``).
 """
 
 from __future__ import annotations
@@ -48,6 +59,7 @@ import json
 import logging
 import os
 import sys
+import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
@@ -57,6 +69,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
+
+from .metrics import Metrics
+from .polyfill import (
+    ForcedToolChoice,
+    Outcome,
+    forced_tool_choice,
+    repair_completion,
+    repair_stream,
+)
 
 __version__ = "0.1.1"
 
@@ -103,6 +124,9 @@ _STRIPPED_RESPONSE_HEADERS = _HOP_BY_HOP_HEADERS | {"content-length", "content-e
 # tool_choice values that Azure accepts without issue.
 _SAFE_TOOL_CHOICES = frozenset({"auto", "none"})
 
+# Response header that tells the client what the shim did with its request.
+OUTCOME_HEADER = "x-shim-outcome"
+
 
 def _load_config() -> dict[str, Any]:
     """Read configuration from environment variables.
@@ -132,7 +156,25 @@ def _load_config() -> dict[str, Any]:
         "allowed_hosts": _LOOPBACK_HOSTS | extra_hosts,
         "connect_timeout": _env_number("SHIM_CONNECT_TIMEOUT", _DEFAULT_CONNECT_TIMEOUT),
         "read_timeout": _env_number("SHIM_READ_TIMEOUT", _DEFAULT_READ_TIMEOUT),
+        "tool_polyfill": _env_flag("SHIM_TOOL_POLYFILL", default=True),
     }
+
+
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
+_FALSE_WORDS = frozenset({"0", "false", "no", "off"})
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    """Read an on/off flag from the environment, or fail with a clear error."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    word = raw.strip().lower()
+    if word in _TRUE_WORDS:
+        return True
+    if word in _FALSE_WORDS:
+        return False
+    raise RuntimeError(f"{name} must be on or off, got {raw!r}")
 
 
 def _env_number(name: str, default: float) -> float:
@@ -312,7 +354,9 @@ def create_app(
         openapi_url=None,
         lifespan=lifespan,
     )
+    metrics = Metrics()
     app.state.http_client = client
+    app.state.metrics = metrics
     app.add_middleware(
         LocalOnlyMiddleware,
         allowed_hosts=config.get("allowed_hosts", _LOOPBACK_HOSTS),
@@ -320,11 +364,24 @@ def create_app(
 
     upstream = config["upstream"]
     auth_headers = build_upstream_headers(config)
+    tool_polyfill = config.get("tool_polyfill", True)
+
+    def finish(
+        response: Response, outcome: Outcome, forced_seconds: float | None = None
+    ) -> Response:
+        response.headers[OUTCOME_HEADER] = outcome.value
+        metrics.record(outcome, forced_seconds=forced_seconds)
+        return response
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         """Lightweight liveness probe."""
         return {"status": "ok", "version": __version__}
+
+    @app.get("/metrics")
+    async def metrics_endpoint() -> Response:
+        """Prometheus metrics for this shim instance."""
+        return Response(content=metrics.render(), media_type=metrics.content_type)
 
     @app.api_route(
         "/{path:path}",
@@ -332,12 +389,21 @@ def create_app(
     )
     async def forward(path: str, request: Request) -> Response:
         """Forward any request to the upstream, applying compat fixes."""
+        started = time.perf_counter()
         body = await request.body()
+        is_chat = request.method == "POST" and path.endswith("chat/completions")
+        forced: ForcedToolChoice | None = None
+        default_outcome = Outcome.PASSTHROUGH
 
-        if request.method == "POST" and path.endswith("chat/completions"):
+        if is_chat:
+            payload = _json_object(body)
+            if tool_polyfill and payload is not None:
+                forced = forced_tool_choice(payload)
             body, notes = sanitize_chat_body(body)
             for note in notes:
                 logger.info("sanitized request: %s", note)
+            if notes:
+                default_outcome = Outcome.REWRITTEN
 
         forward_headers = {
             k: v for k, v in request.headers.items() if k.lower() not in _STRIPPED_REQUEST_HEADERS
@@ -357,32 +423,89 @@ def create_app(
             )
             upstream_response = await client.send(upstream_request, stream=True)
         except httpx.HTTPError as exc:
-            return upstream_error_response(exc)
+            return finish(upstream_error_response(exc), Outcome.UPSTREAM_ERROR)
 
         headers = forwardable_response_headers(upstream_response.headers)
+        is_sse = "text/event-stream" in upstream_response.headers.get("content-type", "")
 
-        if "text/event-stream" in upstream_response.headers.get("content-type", ""):
-            return StreamingResponse(
+        if is_sse and forced is None:
+            response = StreamingResponse(
                 relay_sse(upstream_response),
                 status_code=upstream_response.status_code,
                 headers=headers,
             )
+            return finish(response, default_outcome)
 
         try:
             content = await upstream_response.aread()
         except httpx.HTTPError as exc:
-            return upstream_error_response(exc)
+            return finish(upstream_error_response(exc), Outcome.UPSTREAM_ERROR)
         finally:
             await upstream_response.aclose()
 
-        return Response(
+        ok = upstream_response.status_code == 200
+        if forced is not None and ok:
+            # The whole answer is needed before it can be checked against the
+            # tool schemas, so forced requests are buffered, streamed or not.
+            repair = repair_stream if is_sse else repair_completion
+            content, outcome = repair(content, forced)
+            elapsed = time.perf_counter() - started
+            logger.info("forced tool_choice outcome=%s seconds=%.2f", outcome.value, elapsed)
+            if outcome is Outcome.EMPTY_CHOICES and not is_sse:
+                return finish(empty_choices_response(headers), outcome, elapsed)
+            response = Response(content=content, status_code=200, headers=headers)
+            return finish(response, outcome, elapsed)
+
+        if is_chat and ok and not is_sse and _is_empty_completion(content):
+            logger.error("upstream returned HTTP 200 with no choices")
+            return finish(empty_choices_response(headers), Outcome.EMPTY_CHOICES)
+
+        response = Response(
             content=content,
             status_code=upstream_response.status_code,
             headers=headers,
             media_type="application/json",  # used only if upstream sent no content-type
         )
+        return finish(response, default_outcome)
 
     return app
+
+
+def _json_object(body: bytes) -> dict[str, Any] | None:
+    """Parse a request body as a JSON object, or return ``None``."""
+    try:
+        payload = json.loads(body) if body else None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _is_empty_completion(content: bytes) -> bool:
+    """Return ``True`` for a Chat Completions body with ``choices: []``."""
+    try:
+        payload = json.loads(content)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    return isinstance(payload, dict) and payload.get("choices") == []
+
+
+def empty_choices_response(headers: Mapping[str, str]) -> JSONResponse:
+    """Turn a silent ``choices: []`` answer into an explicit 502 error.
+
+    Upstream headers (request IDs, rate limits) are kept so the failure can
+    still be correlated with the provider.
+    """
+    kept = {k: v for k, v in headers.items() if k.lower() != "content-type"}
+    return JSONResponse(
+        status_code=502,
+        headers=kept,
+        content={
+            "error": {
+                "message": "upstream returned HTTP 200 with no choices",
+                "type": Outcome.EMPTY_CHOICES.value,
+            }
+        },
+    )
 
 
 def _upstream_error_payload(exc: httpx.HTTPError) -> tuple[int, dict[str, Any]]:
