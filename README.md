@@ -236,6 +236,44 @@ The shim sets its own `Content-Type` and drops the client's copy, plus `Authoriz
 
 ---
 
+## Tracing and fixtures
+
+### OpenTelemetry (optional)
+
+```bash
+pip install '.[otel]'
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 systemctl --user restart gpt-oss-azure-opencode-shim
+```
+
+Each chat request becomes one span named `chat <model>`, with GenAI semantic conventions (`gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons`) plus `shim.outcome`, `shim.polyfill.mode`, `shim.tool_choice.forced` and, in observe mode, `shim.observed_outcome`. A streamed request's span ends with its stream.
+
+The `gen_ai.*` attributes describe the answer as the model produced it, so a rescued answer keeps `finish_reason: "stop"` while `shim.outcome` is `rescued`. **The upstream host is never recorded**, because it contains the Azure resource name. `OTEL_TRACES_EXPORTER=console` prints spans to the log instead of sending them.
+
+### Traces to fixtures
+
+Set `SHIM_TRACE_DIR` and the shim records the forced requests worth replaying (by default `rescued`, `failed` and `empty_choices`, configurable with `SHIM_TRACE_OUTCOMES`):
+
+```bash
+SHIM_TRACE_DIR=~/.local/share/gpt-oss-azure-opencode-shim/traces
+```
+
+A trace holds the candidate tools, the original `tool_choice` and the raw upstream answer. **It never holds `messages`**, so prompts, file contents and tool results stay out; the directory is created `0700` and the files `0600`. The recorded answer is still model output, so review a trace before committing it.
+
+Promote one into a regression fixture:
+
+```bash
+python -m evals.fixtures list ~/.local/share/gpt-oss-azure-opencode-shim/traces/traces-2026-09-22.jsonl
+python -m evals.fixtures promote TRACES.jsonl --line 41 --id reasoning-leak \
+  --description "Empty content; the call's arguments end the reasoning" \
+  --keep-tools glob,read,StructuredOutput --replace /home/me/project=/repo --coalesce
+```
+
+`--keep-tools` drops tools that reveal local setup and `--replace` scrubs strings. Streamed text arrives split across events, so a replacement that still matches the joined text is refused with a pointer to `--coalesce`, which merges the text deltas first. `tests/test_fixture_replay.py` then replays every fixture offline on each CI run: a change in the polyfill that alters a decision on a real answer fails there.
+
+The fixtures in `tests/fixtures/polyfill/` were recorded this way from `gpt-oss-120b` and cover both rescued shapes, the three shapes left unchanged (including a leaked call whose JSON is truncated, where completing it would mean inventing arguments) and two native tool calls.
+
+---
+
 ## Evaluation
 
 [`evals/tool_choice_eval.py`](evals/tool_choice_eval.py) sends 15 forced-tool scenarios ([`evals/scenarios.py`](evals/scenarios.py)) to each target: final-answer steps after a tool result, single-turn extraction into a schema, forced functions, and `"required"` with action tools (7 of them streamed). A run succeeds when the first tool call names the expected tool and its arguments validate against that tool's schema. A turn is stalled when the answer has no tool call at all.
@@ -299,6 +337,8 @@ Do not expose the shim on a network interface. The `Host` check does not stop a 
 | `SHIM_CONNECT_TIMEOUT`  | no       | `10`        | Seconds to open a connection to Azure                |
 | `SHIM_READ_TIMEOUT`     | no       | `600`       | Maximum seconds between bytes received from Azure    |
 | `SHIM_TOOL_POLYFILL`    | no       | `on`        | `on`, `observe` or `off` (see Tool-call polyfill)    |
+| `SHIM_TRACE_DIR`        | no       | —           | Directory for traces of forced requests              |
+| `SHIM_TRACE_OUTCOMES`   | no       | `rescued,failed,empty_choices` | Outcomes worth tracing            |
 
 ---
 

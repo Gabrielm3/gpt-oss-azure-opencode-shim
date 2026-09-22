@@ -143,3 +143,21 @@ async def test_interrupted_sse_stream_ends_with_error_event(shim_client, error: 
     assert "[DONE]" not in events
     last = json.loads(events[-1])
     assert last["error"]["type"] in {"upstream_error", "upstream_timeout"}
+
+
+@pytest.mark.parametrize("error", [None, httpx.ReadError("reset")])
+async def test_relay_always_runs_on_close(error: Exception | None) -> None:
+    from gpt_oss_shim.shim import relay_sse
+
+    closed: list[bool] = []
+    response = httpx.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        stream=ChunkedStream([b"data: {}\n\n"], error),
+        request=httpx.Request("POST", "http://upstream.test"),
+    )
+
+    async for _ in relay_sse(response, on_close=lambda: closed.append(True)):
+        pass
+
+    assert closed == [True], "the span must end whether the stream finished or broke"
