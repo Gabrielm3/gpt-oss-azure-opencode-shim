@@ -554,6 +554,26 @@ async def relay_sse(response: httpx.Response) -> AsyncIterator[bytes]:
         await response.aclose()
 
 
+_LOG_LEVELS = {"critical", "error", "warning", "info", "debug", "trace"}
+
+
+def configure_logging(level: str) -> None:
+    """Apply ``SHIM_LOG_LEVEL`` to the shim logger and quiet the HTTP client.
+
+    httpx logs every request line at INFO, and that line holds the upstream
+    URL with the Azure resource name. It stays at WARNING unless debugging, so
+    logs pasted into an issue do not reveal the resource.
+    """
+    name = level.strip().lower()
+    if name not in _LOG_LEVELS:
+        raise RuntimeError(f"SHIM_LOG_LEVEL must be one of {sorted(_LOG_LEVELS)}, got {level!r}")
+    numeric = logging.DEBUG if name == "trace" else getattr(logging, name.upper())
+    logger.setLevel(numeric)
+    client_level = logging.DEBUG if numeric <= logging.DEBUG else logging.WARNING
+    for client_logger in ("httpx", "httpcore"):
+        logging.getLogger(client_logger).setLevel(client_level)
+
+
 def main() -> int:
     """CLI entry point."""
     logging.basicConfig(
@@ -563,6 +583,7 @@ def main() -> int:
 
     try:
         config = _load_config()
+        configure_logging(config["log_level"])
     except RuntimeError as exc:
         logger.error("%s", exc)
         return 1
