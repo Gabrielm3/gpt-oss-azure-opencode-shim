@@ -92,19 +92,18 @@ is the loopback address of the provider `baseURL`.
 
 ## 3. End-to-end results with OpenCode
 
-| Scenario | Direct to Azure | Through the shim |
-|----------|-----------------|------------------|
-| `opencode run` with a tool call (Glob) | Works | Works |
-| Structured output (`format: json_schema`) | `APIError`: `tool_choice 'required' is not supported for the model` (HTTP 400) | The request completes. `gpt-oss-120b` answered in plain text, so OpenCode reported `StructuredOutputError: Model did not produce structured output` |
+| Scenario | Direct to Azure | Shim v0.1.1 (rewrite only) | Shim v0.2.0 (rewrite + polyfill) |
+|----------|-----------------|----------------------------|----------------------------------|
+| `opencode run` with a tool call (Glob) | Works | Works | Works |
+| Structured output (`format: json_schema`), 10 runs | `APIError`: `tool_choice 'required' is not supported for the model` (HTTP 400) | 0/10: `StructuredOutputError: Model did not produce structured output` | 9/10 structured output returned |
 
-Two conclusions:
+Conclusions:
 
 1. With OpenCode 1.18.31 and the `@ai-sdk/openai-compatible` provider, normal
    agent runs work against Azure without the shim.
-2. For structured output, the shim replaces the HTTP 400 with a completed
-   request. Rewriting to `"auto"` removes the constraint, so the model can
-   still answer without calling `StructuredOutput`. The shim cannot force
-   schema-conforming output.
+2. Rewriting to `"auto"` alone replaces the HTTP 400 with a completed request,
+   but the model then answers without calling `StructuredOutput`. Section 6
+   shows what it writes instead, and how v0.2.0 recovers the tool call.
 
 A separate note: `opencode run` with the `@ai-sdk/openai` provider package
 failed against the same deployment with `Invalid parameter: the model does
@@ -141,3 +140,55 @@ export AZURE_FOUNDRY_API_KEY=your-key-here
 The script checks E1, E2 and E3 directly against Azure, then checks the
 forced-function and `"required"` cases through the shim. It exits with a
 non-zero status if any result differs from the tables above.
+
+## 6. Answers that miss the tool call
+
+With the rewrite to `"auto"`, `gpt-oss-120b` usually calls the tool. When it
+does not, the answer takes one of three shapes. Each one below was recorded
+from real responses to forced requests:
+
+| Shape | Example | Shim v0.2.0 |
+|-------|---------|-------------|
+| The answer as JSON text | content `{"files": ["beta.md", "alpha.md"]}`, `finish_reason: "stop"` | Converted into the tool call |
+| The call leaked into the reasoning, empty content | reasoning `…Let's open whole file.{"filePath": "pyproject.toml"}`, content `""`, `finish_reason: "stop"` | Converted into the tool call |
+| A prose answer | `The directory contains the following Markdown files: …` | Left unchanged (`failed`) |
+
+The first shape is what OpenCode structured output produced every time
+(section 3): OpenCode asks for JSON, and the model writes the JSON as text
+instead of passing it to `StructuredOutput`. The second shape is what clients
+see as an empty assistant turn.
+
+The polyfill converts an answer only when the JSON validates against the
+tool's JSON Schema, uses only declared top-level properties, and matches
+exactly one candidate tool. It never guesses a tool for prose.
+
+### Two things that did not help
+
+Before the polyfill, two cheaper ideas were tested on OpenCode structured
+output (5 runs each). Neither returned any structured output:
+
+| Attempt | Result |
+|---------|--------|
+| Add an instruction to the system prompt: call one of the tools, do not answer in plain text | 0/5 |
+| OpenCode `format.retryCount: 3` | 0/5, and no retry was observed (same latency as without it) |
+
+With `retryCount` set, `GET /session/{id}/message` on `opencode serve`
+1.18.31 fails with HTTP 400 `Expected OutputFormatJsonSchema`, so the session
+can no longer be read through the API.
+
+### Evaluation
+
+`evals/tool_choice_eval.py` runs 15 forced-tool scenarios against each target
+(15 × 4 runs per target, 2026-09-22):
+
+| Target | Strict success | Stalled turns (no tool call) |
+|--------|----------------|------------------------------|
+| Direct to Azure | 0/60 | 16/16 |
+| Shim v0.1.1 (rewrite only) | 50/60 | 7/59 |
+| Shim v0.2.0 (rewrite + polyfill) | 49/60 | 2/56 |
+
+Strict success counts only the expected tool with schema-valid arguments. The
+polyfill rescued 4 turns there, all calls to an intermediate tool the model had
+leaked into its reasoning, so the strict scorer did not count them. Azure
+answered 6 requests, spread over all three targets, with HTTP 500. Those are
+excluded from the stalled-turn ratio.

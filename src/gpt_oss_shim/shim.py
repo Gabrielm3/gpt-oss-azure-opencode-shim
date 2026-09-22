@@ -19,10 +19,11 @@ recorded Azure behavior behind each fix.
    or with a non-local ``Host`` get HTTP 403, because every forwarded request
    carries the real API key.
 
-5. Tool-call polyfill. After the rewrite, the model often returns the answer
-   as JSON text instead of calling the required tool. For forced requests the
-   shim buffers the answer and, if the text matches exactly one candidate
-   tool schema, returns it as that tool call (see ``polyfill.py``).
+5. Tool-call polyfill. After the rewrite, the model sometimes misses the tool
+   call: it writes the answer as JSON text, or leaks the call's arguments into
+   its reasoning. For forced requests the shim buffers the answer and, if the
+   JSON matches exactly one candidate tool schema, returns it as that tool
+   call (see ``polyfill.py``).
 
 6. Outcomes. Every forwarded request gets an ``x-shim-outcome`` header and a
    count in ``/metrics`` (Prometheus); a ``choices: []`` answer becomes 502.
@@ -39,7 +40,8 @@ SHIM_HOST
 SHIM_PORT
     Bind port (default: ``9526``).
 SHIM_LOG_LEVEL
-    Uvicorn log level (default: ``info``).
+    Log level for the shim and uvicorn (default: ``info``). HTTP client
+    request lines, which contain the upstream URL, appear only at ``debug``.
 SHIM_ALLOWED_HOSTS
     Comma-separated hostnames accepted in the ``Host`` header, in addition
     to ``localhost``, ``127.0.0.1`` and ``::1`` (default: empty).
@@ -79,7 +81,7 @@ from .polyfill import (
     repair_stream,
 )
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 logger = logging.getLogger("gpt_oss_shim")
 
