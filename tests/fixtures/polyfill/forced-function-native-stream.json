@@ -1,0 +1,69 @@
+{
+  "id": "forced-function-native-stream",
+  "description": "Forced function (create_ticket), streamed: the model calls it itself; the answer must pass unchanged",
+  "source": {
+    "model": "gpt-oss-120b",
+    "ts": "2026-09-22T13:41:24+00:00",
+    "mode": "on"
+  },
+  "stream": true,
+  "tool_choice": {
+    "type": "function",
+    "function": {
+      "name": "create_ticket"
+    }
+  },
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "create_ticket",
+        "description": "Create an issue ticket.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "priority": {
+              "type": "string",
+              "enum": [
+                "p0",
+                "p1",
+                "p2",
+                "p3"
+              ]
+            }
+          },
+          "required": [
+            "title",
+            "priority"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "search_docs",
+        "description": "Search the documentation.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    }
+  ],
+  "response": "data: {\"id\": \"5d69f2680df64e358a1696eddc4966f4\", \"object\": \"chat.completion.chunk\", \"created\": 1790084486, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"reasoning_content\": \"User wants us to create a high-priority ticket about broken login for all users. Use create_ticket function. Title: \\\"Login is broken for all users\\\". Priority: high; mapping to p0? High priority likely p0 (critical). Use p0.\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"5d69f2680df64e358a1696eddc4966f4\", \"object\": \"chat.completion.chunk\", \"created\": 1790084486, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"id\": \"call_5e0743df4daa4d4db2201e8d\", \"index\": 0, \"type\": \"function\", \"function\": {\"name\": \"create_ticket\", \"arguments\": \"{\\\"title\\\": \\\"Login is broken for all users\\\", \\\"priority\\\": \\\"p0\\\"}\"}}]}, \"logprobs\": null, \"finish_reason\": null, \"matched_stop\": null}], \"usage\": null}\n\ndata: {\"id\": \"5d69f2680df64e358a1696eddc4966f4\", \"object\": \"chat.completion.chunk\", \"created\": 1790084486, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {}, \"logprobs\": null, \"finish_reason\": \"tool_calls\", \"matched_stop\": 200012}]}\n\ndata: {\"id\": \"5d69f2680df64e358a1696eddc4966f4\", \"object\": \"chat.completion.chunk\", \"created\": 1790084486, \"model\": \"gpt-oss-120b\", \"choices\": [], \"usage\": {\"prompt_tokens\": 186, \"total_tokens\": 280, \"completion_tokens\": 94, \"prompt_tokens_details\": null, \"reasoning_tokens\": 57}}\n\ndata: [DONE]\n\n",
+  "expected": {
+    "outcome": "native",
+    "tool": "create_ticket"
+  }
+}

@@ -49,6 +49,14 @@ SHIM_CONNECT_TIMEOUT
     Seconds to open a connection to the upstream (default: ``10``).
 SHIM_READ_TIMEOUT
     Maximum seconds between bytes received from the upstream (default: ``600``).
+SHIM_TRACE_DIR
+    Directory for traces of forced requests, used to build regression
+    fixtures (default: empty, no traces).
+SHIM_TRACE_OUTCOMES
+    Outcomes worth tracing (default: ``rescued,failed,empty_choices``).
+OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_TRACES_EXPORTER
+    Standard OpenTelemetry variables. Tracing is on when an endpoint is set,
+    or with ``OTEL_TRACES_EXPORTER=console``. Needs the ``otel`` extra.
 SHIM_TOOL_POLYFILL
     ``on`` (default): repair answers to forced requests into the tool call.
     ``observe``: leave answers unchanged and only count what a repair would do
@@ -65,6 +73,7 @@ import sys
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -82,8 +91,10 @@ from .polyfill import (
     repair_completion,
     repair_stream,
 )
+from .telemetry import NO_SPAN, ChatSpan, Tracing, build_tracer, response_summary
+from .traces import DEFAULT_TRACE_OUTCOMES, TraceWriter
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 logger = logging.getLogger("gpt_oss_shim")
 
@@ -161,7 +172,28 @@ def _load_config() -> dict[str, Any]:
         "connect_timeout": _env_number("SHIM_CONNECT_TIMEOUT", _DEFAULT_CONNECT_TIMEOUT),
         "read_timeout": _env_number("SHIM_READ_TIMEOUT", _DEFAULT_READ_TIMEOUT),
         "tool_polyfill": _env_polyfill_mode("SHIM_TOOL_POLYFILL"),
+        "trace_dir": _env_path("SHIM_TRACE_DIR"),
+        "trace_outcomes": _env_outcomes("SHIM_TRACE_OUTCOMES", DEFAULT_TRACE_OUTCOMES),
     }
+
+
+def _env_path(name: str) -> Path | None:
+    """Read an optional directory path from the environment."""
+    raw = os.environ.get(name, "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+def _env_outcomes(name: str, default: frozenset[Outcome]) -> frozenset[Outcome]:
+    """Read a comma-separated list of outcome names, or fail with a clear error."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    known = {outcome.value: outcome for outcome in Outcome}
+    names = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    unknown = [part for part in names if part not in known]
+    if unknown:
+        raise RuntimeError(f"{name} has unknown outcomes {unknown}; use {sorted(known)}")
+    return frozenset(known[part] for part in names)
 
 
 _TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
@@ -326,6 +358,7 @@ def create_app(
     config: dict[str, Any] | None = None,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
+    tracer: Any | None = None,
 ) -> FastAPI:
     """Application factory.
 
@@ -337,6 +370,8 @@ def create_app(
     transport
         Optional transport for the upstream client, e.g. ``httpx.MockTransport``
         in tests. Defaults to real network I/O.
+    tracer
+        Optional OpenTelemetry tracer. Without one, no spans are produced.
     """
     if config is None:
         config = _load_config()
@@ -361,6 +396,7 @@ def create_app(
         lifespan=lifespan,
     )
     metrics = Metrics()
+    tracing = Tracing(tracer)
     app.state.http_client = client
     app.state.metrics = metrics
     app.add_middleware(
@@ -371,20 +407,41 @@ def create_app(
     upstream = config["upstream"]
     auth_headers = build_upstream_headers(config)
     mode = PolyfillMode(config.get("tool_polyfill", PolyfillMode.ON))
+    trace_dir = config.get("trace_dir")
+    traces = (
+        TraceWriter(Path(trace_dir), config.get("trace_outcomes", DEFAULT_TRACE_OUTCOMES))
+        if trace_dir
+        else None
+    )
+
+    def trace(outcome: Outcome, raw: bytes, request: dict[str, Any], *, is_sse: bool) -> None:
+        if traces is not None:
+            traces.write(outcome=outcome, mode=mode, stream=is_sse, request=request, response=raw)
 
     def finish(
-        response: Response, outcome: Outcome, forced_seconds: float | None = None
+        response: Response,
+        outcome: Outcome,
+        forced_seconds: float | None = None,
+        *,
+        span: ChatSpan = NO_SPAN,
+        summary: dict[str, Any] | None = None,
+        error: BaseException | None = None,
     ) -> Response:
         response.headers[OUTCOME_HEADER] = outcome.value
         metrics.record(outcome, forced_seconds=forced_seconds)
+        span.finish(outcome, status_code=response.status_code, summary=summary, error=error)
         return response
 
-    def observe(content: bytes, forced: ForcedToolChoice, *, is_sse: bool) -> None:
+    def observe(
+        content: bytes, forced: ForcedToolChoice, request: dict[str, Any], *, is_sse: bool
+    ) -> Outcome:
         """Count what a repair would do, without changing the answer."""
         repair = repair_stream if is_sse else repair_completion
         _, outcome = repair(content, forced)
         metrics.record_observed(outcome)
+        trace(outcome, content, request, is_sse=is_sse)
         logger.info("observed forced tool_choice outcome=%s (answer unchanged)", outcome.value)
+        return outcome
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -406,17 +463,22 @@ def create_app(
         body = await request.body()
         is_chat = request.method == "POST" and path.endswith("chat/completions")
         forced: ForcedToolChoice | None = None
+        payload: dict[str, Any] = {}
         default_outcome = Outcome.PASSTHROUGH
+        span = NO_SPAN
 
         if is_chat:
-            payload = _json_object(body)
-            if mode is not PolyfillMode.OFF and payload is not None:
+            payload = _json_object(body) or {}
+            if mode is not PolyfillMode.OFF:
                 forced = forced_tool_choice(payload)
             body, notes = sanitize_chat_body(body)
             for note in notes:
                 logger.info("sanitized request: %s", note)
             if notes:
                 default_outcome = Outcome.REWRITTEN
+            span = tracing.start_chat(
+                model=payload.get("model"), forced=forced is not None, mode=mode
+            )
 
         forward_headers = {
             k: v for k, v in request.headers.items() if k.lower() not in _STRIPPED_REQUEST_HEADERS
@@ -436,7 +498,9 @@ def create_app(
             )
             upstream_response = await client.send(upstream_request, stream=True)
         except httpx.HTTPError as exc:
-            return finish(upstream_error_response(exc), Outcome.UPSTREAM_ERROR)
+            return finish(
+                upstream_error_response(exc), Outcome.UPSTREAM_ERROR, span=span, error=exc
+            )
 
         headers = forwardable_response_headers(upstream_response.headers)
         is_sse = "text/event-stream" in upstream_response.headers.get("content-type", "")
@@ -445,14 +509,24 @@ def create_app(
 
         if is_sse and (forced is None or observing):
             on_complete = None
+            streamed: dict[str, Any] = {}
             if observing:
-                observed_request = forced
+                observed_forced, observed_payload = forced, payload
 
                 def on_complete(body: bytes) -> None:
-                    observe(body, observed_request, is_sse=True)
+                    span.set_observed(observe(body, observed_forced, observed_payload, is_sse=True))
+                    streamed["summary"] = response_summary(body, is_sse=True)
+
+            def on_close() -> None:
+                # The span covers the whole stream, so it ends with it.
+                span.finish(
+                    default_outcome,
+                    status_code=upstream_response.status_code,
+                    summary=streamed.get("summary"),
+                )
 
             response = StreamingResponse(
-                relay_sse(upstream_response, on_complete=on_complete),
+                relay_sse(upstream_response, on_complete=on_complete, on_close=on_close),
                 status_code=upstream_response.status_code,
                 headers=headers,
             )
@@ -461,27 +535,37 @@ def create_app(
         try:
             content = await upstream_response.aread()
         except httpx.HTTPError as exc:
-            return finish(upstream_error_response(exc), Outcome.UPSTREAM_ERROR)
+            return finish(
+                upstream_error_response(exc), Outcome.UPSTREAM_ERROR, span=span, error=exc
+            )
         finally:
             await upstream_response.aclose()
 
+        summary = response_summary(content, is_sse=is_sse) if is_chat else None
+
         if observing:
-            observe(content, forced, is_sse=False)
+            span.set_observed(observe(content, forced, payload, is_sse=False))
         elif forced is not None and ok:
             # The whole answer is needed before it can be checked against the
             # tool schemas, so forced requests are buffered, streamed or not.
             repair = repair_stream if is_sse else repair_completion
-            content, outcome = repair(content, forced)
+            raw = content
+            content, outcome = repair(raw, forced)
+            trace(outcome, raw, payload, is_sse=is_sse)
             elapsed = time.perf_counter() - started
             logger.info("forced tool_choice outcome=%s seconds=%.2f", outcome.value, elapsed)
             if outcome is Outcome.EMPTY_CHOICES and not is_sse:
-                return finish(empty_choices_response(headers), outcome, elapsed)
+                return finish(
+                    empty_choices_response(headers), outcome, elapsed, span=span, summary=summary
+                )
             response = Response(content=content, status_code=200, headers=headers)
-            return finish(response, outcome, elapsed)
+            return finish(response, outcome, elapsed, span=span, summary=summary)
 
         if is_chat and ok and not is_sse and _is_empty_completion(content):
             logger.error("upstream returned HTTP 200 with no choices")
-            return finish(empty_choices_response(headers), Outcome.EMPTY_CHOICES)
+            return finish(
+                empty_choices_response(headers), Outcome.EMPTY_CHOICES, span=span, summary=summary
+            )
 
         response = Response(
             content=content,
@@ -489,7 +573,7 @@ def create_app(
             headers=headers,
             media_type="application/json",  # used only if upstream sent no content-type
         )
-        return finish(response, default_outcome)
+        return finish(response, default_outcome, span=span, summary=summary)
 
     return app
 
@@ -561,6 +645,7 @@ async def relay_sse(
     response: httpx.Response,
     *,
     on_complete: Callable[[bytes], None] | None = None,
+    on_close: Callable[[], None] | None = None,
 ) -> AsyncIterator[bytes]:
     """Relay an upstream SSE body, ending with an error event if it breaks.
 
@@ -570,7 +655,8 @@ async def relay_sse(
     event as an error instead of treating the truncated stream as complete.
 
     ``on_complete`` receives a copy of the whole body once the stream ends
-    normally. It is not called for a broken stream.
+    normally. It is not called for a broken stream. ``on_close`` always runs
+    when the relay ends, however it ended.
     """
     copy: list[bytes] = []
     try:
@@ -592,6 +678,11 @@ async def relay_sse(
                 logger.exception("failed to evaluate a streamed answer in observe mode")
     finally:
         await response.aclose()
+        if on_close is not None:
+            try:
+                on_close()
+            except Exception:
+                logger.exception("failed to close out a streamed response")
 
 
 _LOG_LEVELS = {"critical", "error", "warning", "info", "debug", "trace"}
@@ -638,7 +729,7 @@ def main() -> int:
     import uvicorn
 
     uvicorn.run(
-        create_app(config),
+        create_app(config, tracer=build_tracer(__version__)),
         host=config["host"],
         port=config["port"],
         log_level=config["log_level"],

@@ -1,0 +1,66 @@
+{
+  "id": "forced-function-native",
+  "description": "Forced function (get_weather), non-streamed: the model calls it itself; the answer must pass unchanged",
+  "source": {
+    "model": "gpt-oss-120b",
+    "ts": "2026-09-22T13:41:23+00:00",
+    "mode": "on"
+  },
+  "stream": false,
+  "tool_choice": {
+    "type": "function",
+    "function": {
+      "name": "get_weather"
+    }
+  },
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            },
+            "unit": {
+              "type": "string",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ]
+            }
+          },
+          "required": [
+            "city"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "search_docs",
+        "description": "Search the documentation.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    }
+  ],
+  "response": "{\"id\":\"aa83b44dcd40408d81e344f840edce77\",\"model\":\"gpt-oss-120b\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"We need to fetch weather. Use get_weather with city \\\"Lisbon\\\". Use default unit? Not specified, could be Celsius. Use unit param.\",\"tool_calls\":[{\"id\":\"call_3e87cb18876842899f6ff11d\",\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\": \\\"Lisbon\\\", \\\"unit\\\": \\\"celsius\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":172,\"completion_tokens\":67,\"total_tokens\":239,\"audio_prompt_tokens\":0},\"created\":1790084485,\"object\":\"chat.completion\",\"prompt_filter_results\":null}",
+  "expected": {
+    "outcome": "native",
+    "tool": "get_weather"
+  }
+}

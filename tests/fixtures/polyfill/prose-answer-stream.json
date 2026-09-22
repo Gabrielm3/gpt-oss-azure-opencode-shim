@@ -1,0 +1,102 @@
+{
+  "id": "prose-answer-stream",
+  "description": "Streamed final-answer step answered in Markdown prose; left unchanged",
+  "source": {
+    "model": "gpt-oss-120b",
+    "ts": "2026-09-22T13:41:32+00:00",
+    "mode": "on"
+  },
+  "stream": true,
+  "tool_choice": "required",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "glob",
+        "description": "Find files by glob pattern.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read",
+        "description": "Read a file.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filePath": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "filePath"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "bash",
+        "description": "Run a shell command.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "StructuredOutput",
+        "description": "Use this tool to return your final response in the requested structured format.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer"
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "count",
+            "files"
+          ]
+        }
+      }
+    }
+  ],
+  "response": "data: {\"id\": \"ffe10c1ba8b4447eab60b0cd834cec20\", \"object\": \"chat.completion.chunk\", \"created\": 1790084492, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"**Number of TODO comments:** 3  \\n\\n**Files containing TODOs:**\\n- `src/app.py` (2 TODOs)\\n- `src/db.py` (1 TODO)\", \"reasoning_content\": \"We need to count TODO comments and list files. The grep output shows three matches in src/app.py (two) and src/db.py (one). So total 3 TODOs. Files: src/app.py, src/db.py. Need to answer with count and files. Possibly need to output structured format? The user didn't request a specific format. Just answer. Provide count and list.\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"ffe10c1ba8b4447eab60b0cd834cec20\", \"object\": \"chat.completion.chunk\", \"created\": 1790084492, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": null}, \"logprobs\": null, \"finish_reason\": null, \"matched_stop\": null}], \"usage\": null}\n\ndata: {\"id\": \"ffe10c1ba8b4447eab60b0cd834cec20\", \"object\": \"chat.completion.chunk\", \"created\": 1790084492, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": null}, \"logprobs\": null, \"finish_reason\": null, \"matched_stop\": null}], \"usage\": null}\n\ndata: {\"id\": \"ffe10c1ba8b4447eab60b0cd834cec20\", \"object\": \"chat.completion.chunk\", \"created\": 1790084492, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": null}, \"logprobs\": null, \"finish_reason\": null, \"matched_stop\": null}], \"usage\": null}\n\ndata: {\"id\": \"ffe10c1ba8b4447eab60b0cd834cec20\", \"object\": \"chat.completion.chunk\", \"created\": 1790084492, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": null}, \"logprobs\": null, \"finish_reason\": null, \"matched_stop\": null}], \"usage\": null}\n\ndata: {\"id\": \"ffe10c1ba8b4447eab60b0cd834cec20\", \"object\": \"chat.completion.chunk\", \"created\": 1790084492, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": null}, \"logprobs\": null, \"finish_reason\": null, \"matched_stop\": null}], \"usage\": null}\n\ndata: {\"id\": \"ffe10c1ba8b4447eab60b0cd834cec20\", \"object\": \"chat.completion.chunk\", \"created\": 1790084492, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": null}, \"logprobs\": null, \"finish_reason\": null, \"matched_stop\": null}], \"usage\": null}\n\ndata: {\"id\": \"ffe10c1ba8b4447eab60b0cd834cec20\", \"object\": \"chat.completion.chunk\", \"created\": 1790084492, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": null}, \"logprobs\": null, \"finish_reason\": null, \"matched_stop\": null}], \"usage\": null}\n\ndata: {\"id\": \"ffe10c1ba8b4447eab60b0cd834cec20\", \"object\": \"chat.completion.chunk\", \"created\": 1790084492, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": null}, \"logprobs\": null, \"finish_reason\": null, \"matched_stop\": null}], \"usage\": null}\n\ndata: {\"id\": \"ffe10c1ba8b4447eab60b0cd834cec20\", \"object\": \"chat.completion.chunk\", \"created\": 1790084492, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": null}, \"logprobs\": null, \"finish_reason\": null, \"matched_stop\": null}], \"usage\": null}\n\ndata: {\"id\": \"ffe10c1ba8b4447eab60b0cd834cec20\", \"object\": \"chat.completion.chunk\", \"created\": 1790084492, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": null}, \"logprobs\": null, \"finish_reason\": null, \"matched_stop\": null}], \"usage\": null}\n\ndata: {\"id\": \"ffe10c1ba8b4447eab60b0cd834cec20\", \"object\": \"chat.completion.chunk\", \"created\": 1790084492, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": null}, \"logprobs\": null, \"finish_reason\": null, \"matched_stop\": null}], \"usage\": null}\n\ndata: {\"id\": \"ffe10c1ba8b4447eab60b0cd834cec20\", \"object\": \"chat.completion.chunk\", \"created\": 1790084492, \"model\": \"gpt-oss-120b\", \"choices\": [{\"index\": 0, \"delta\": {}, \"logprobs\": null, \"finish_reason\": \"stop\", \"matched_stop\": 200002}]}\n\ndata: {\"id\": \"ffe10c1ba8b4447eab60b0cd834cec20\", \"object\": \"chat.completion.chunk\", \"created\": 1790084492, \"model\": \"gpt-oss-120b\", \"choices\": [], \"usage\": {\"prompt_tokens\": 292, \"total_tokens\": 417, \"completion_tokens\": 125, \"prompt_tokens_details\": null, \"reasoning_tokens\": 82}}\n\ndata: [DONE]\n\n",
+  "expected": {
+    "outcome": "failed"
+  }
+}
