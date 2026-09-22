@@ -65,6 +65,7 @@ import sys
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -82,6 +83,7 @@ from .polyfill import (
     repair_completion,
     repair_stream,
 )
+from .traces import DEFAULT_TRACE_OUTCOMES, TraceWriter
 
 __version__ = "0.2.1"
 
@@ -161,7 +163,28 @@ def _load_config() -> dict[str, Any]:
         "connect_timeout": _env_number("SHIM_CONNECT_TIMEOUT", _DEFAULT_CONNECT_TIMEOUT),
         "read_timeout": _env_number("SHIM_READ_TIMEOUT", _DEFAULT_READ_TIMEOUT),
         "tool_polyfill": _env_polyfill_mode("SHIM_TOOL_POLYFILL"),
+        "trace_dir": _env_path("SHIM_TRACE_DIR"),
+        "trace_outcomes": _env_outcomes("SHIM_TRACE_OUTCOMES", DEFAULT_TRACE_OUTCOMES),
     }
+
+
+def _env_path(name: str) -> Path | None:
+    """Read an optional directory path from the environment."""
+    raw = os.environ.get(name, "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+def _env_outcomes(name: str, default: frozenset[Outcome]) -> frozenset[Outcome]:
+    """Read a comma-separated list of outcome names, or fail with a clear error."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    known = {outcome.value: outcome for outcome in Outcome}
+    names = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    unknown = [part for part in names if part not in known]
+    if unknown:
+        raise RuntimeError(f"{name} has unknown outcomes {unknown}; use {sorted(known)}")
+    return frozenset(known[part] for part in names)
 
 
 _TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
@@ -371,6 +394,16 @@ def create_app(
     upstream = config["upstream"]
     auth_headers = build_upstream_headers(config)
     mode = PolyfillMode(config.get("tool_polyfill", PolyfillMode.ON))
+    trace_dir = config.get("trace_dir")
+    traces = (
+        TraceWriter(Path(trace_dir), config.get("trace_outcomes", DEFAULT_TRACE_OUTCOMES))
+        if trace_dir
+        else None
+    )
+
+    def trace(outcome: Outcome, raw: bytes, request: dict[str, Any], *, is_sse: bool) -> None:
+        if traces is not None:
+            traces.write(outcome=outcome, mode=mode, stream=is_sse, request=request, response=raw)
 
     def finish(
         response: Response, outcome: Outcome, forced_seconds: float | None = None
@@ -379,11 +412,14 @@ def create_app(
         metrics.record(outcome, forced_seconds=forced_seconds)
         return response
 
-    def observe(content: bytes, forced: ForcedToolChoice, *, is_sse: bool) -> None:
+    def observe(
+        content: bytes, forced: ForcedToolChoice, request: dict[str, Any], *, is_sse: bool
+    ) -> None:
         """Count what a repair would do, without changing the answer."""
         repair = repair_stream if is_sse else repair_completion
         _, outcome = repair(content, forced)
         metrics.record_observed(outcome)
+        trace(outcome, content, request, is_sse=is_sse)
         logger.info("observed forced tool_choice outcome=%s (answer unchanged)", outcome.value)
 
     @app.get("/healthz")
@@ -406,11 +442,12 @@ def create_app(
         body = await request.body()
         is_chat = request.method == "POST" and path.endswith("chat/completions")
         forced: ForcedToolChoice | None = None
+        payload: dict[str, Any] = {}
         default_outcome = Outcome.PASSTHROUGH
 
         if is_chat:
-            payload = _json_object(body)
-            if mode is not PolyfillMode.OFF and payload is not None:
+            payload = _json_object(body) or {}
+            if mode is not PolyfillMode.OFF:
                 forced = forced_tool_choice(payload)
             body, notes = sanitize_chat_body(body)
             for note in notes:
@@ -446,10 +483,10 @@ def create_app(
         if is_sse and (forced is None or observing):
             on_complete = None
             if observing:
-                observed_request = forced
+                observed_forced, observed_payload = forced, payload
 
                 def on_complete(body: bytes) -> None:
-                    observe(body, observed_request, is_sse=True)
+                    observe(body, observed_forced, observed_payload, is_sse=True)
 
             response = StreamingResponse(
                 relay_sse(upstream_response, on_complete=on_complete),
@@ -466,12 +503,14 @@ def create_app(
             await upstream_response.aclose()
 
         if observing:
-            observe(content, forced, is_sse=False)
+            observe(content, forced, payload, is_sse=False)
         elif forced is not None and ok:
             # The whole answer is needed before it can be checked against the
             # tool schemas, so forced requests are buffered, streamed or not.
             repair = repair_stream if is_sse else repair_completion
-            content, outcome = repair(content, forced)
+            raw = content
+            content, outcome = repair(raw, forced)
+            trace(outcome, raw, payload, is_sse=is_sse)
             elapsed = time.perf_counter() - started
             logger.info("forced tool_choice outcome=%s seconds=%.2f", outcome.value, elapsed)
             if outcome is Outcome.EMPTY_CHOICES and not is_sse:

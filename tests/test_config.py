@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from gpt_oss_shim.polyfill import PolyfillMode
+from gpt_oss_shim.polyfill import Outcome, PolyfillMode
 from gpt_oss_shim.shim import _load_config
 
 REQUIRED = {
@@ -24,6 +24,8 @@ def env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
         "SHIM_CONNECT_TIMEOUT",
         "SHIM_READ_TIMEOUT",
         "SHIM_TOOL_POLYFILL",
+        "SHIM_TRACE_DIR",
+        "SHIM_TRACE_OUTCOMES",
     ):
         monkeypatch.delenv(name, raising=False)
     for name, value in REQUIRED.items():
@@ -120,4 +122,30 @@ def test_invalid_tool_polyfill_flag_raises(env: pytest.MonkeyPatch) -> None:
     env.setenv("SHIM_TOOL_POLYFILL", "maybe")
 
     with pytest.raises(RuntimeError, match="SHIM_TOOL_POLYFILL"):
+        _load_config()
+
+
+def test_tracing_is_off_by_default(env: pytest.MonkeyPatch) -> None:
+    config = _load_config()
+
+    assert config["trace_dir"] is None
+    assert config["trace_outcomes"] == frozenset(
+        {Outcome.RESCUED, Outcome.FAILED, Outcome.EMPTY_CHOICES}
+    )
+
+
+def test_trace_settings_are_read_from_env(env: pytest.MonkeyPatch, tmp_path) -> None:
+    env.setenv("SHIM_TRACE_DIR", str(tmp_path))
+    env.setenv("SHIM_TRACE_OUTCOMES", "failed, native")
+
+    config = _load_config()
+
+    assert config["trace_dir"] == tmp_path
+    assert config["trace_outcomes"] == frozenset({Outcome.FAILED, Outcome.NATIVE})
+
+
+def test_unknown_trace_outcome_raises(env: pytest.MonkeyPatch) -> None:
+    env.setenv("SHIM_TRACE_OUTCOMES", "failed,sometimes")
+
+    with pytest.raises(RuntimeError, match="SHIM_TRACE_OUTCOMES"):
         _load_config()
