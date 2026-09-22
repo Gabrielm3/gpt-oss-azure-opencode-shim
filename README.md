@@ -259,6 +259,8 @@ SHIM_TRACE_DIR=~/.local/share/gpt-oss-azure-opencode-shim/traces
 
 A trace holds the candidate tools, the original `tool_choice` and the raw upstream answer. **It never holds `messages`**, so prompts, file contents and tool results stay out; the directory is created `0700` and the files `0600`. The recorded answer is still model output, so review a trace before committing it.
 
+Traces are appended to one file per day and **are never rotated or deleted**. Each record repeats the tool definitions, so an agent loop writes tens of MB per day (36 requests produced 478 KB in testing). Turn `SHIM_TRACE_DIR` on to collect material, then unset it and delete the directory.
+
 Promote one into a regression fixture:
 
 ```bash
