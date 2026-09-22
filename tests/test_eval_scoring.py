@@ -98,3 +98,25 @@ def test_percentile_uses_nearest_rank() -> None:
     assert percentile(values, 50) == 3.0
     assert percentile(values, 95) == 10.0
     assert percentile([], 50) is None
+
+
+def test_summary_counts_stalled_turns_separately() -> None:
+    from evals.tool_choice_eval import summarize
+
+    records = [
+        {"target": "t", "ok": True, "reason": "ok", "outcome": "native", "seconds": 1.0},
+        {"target": "t", "ok": False, "reason": "no_tool_call", "outcome": "failed", "seconds": 1.0},
+        {
+            "target": "t",
+            "ok": False,
+            "reason": "wrong_tool:read",
+            "outcome": "rescued",
+            "seconds": 1.0,
+        },
+        {"target": "t", "ok": False, "reason": "http_500", "outcome": "rewritten", "seconds": 1.0},
+    ]
+
+    row = summarize(records).splitlines()[2]
+
+    assert "| 1/4 (25%) |" in row
+    assert "| 1/3 (33%) |" in row, "stalled turns exclude upstream HTTP errors"

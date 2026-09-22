@@ -133,24 +133,41 @@ def run_once(
     }
 
 
+# Reasons for which the client got no usable tool call at all: an agent loop stalls.
+_STALLED = frozenset({"no_tool_call", "unparseable"})
+
+
 def summarize(records: list[dict[str, Any]]) -> str:
-    """Render a Markdown table: one row per target."""
+    """Render a Markdown table: one row per target.
+
+    ``Success`` is strict: the expected tool with schema-valid arguments.
+    ``Stalled`` counts answers with no tool call at all, over the answers that
+    came back with HTTP 200 (upstream errors are reported, not counted there).
+    """
     lines = [
-        "| Target | Success | Outcomes (x-shim-outcome) | Failure reasons | p50 s | p95 s |",
-        "| ------ | ------- | ------------------------- | --------------- | ----- | ----- |",
+        "| Target | Success | Stalled turns | Outcomes (x-shim-outcome) | Failure reasons "
+        "| p50 s | p95 s |",
+        "| ------ | ------- | ------------- | ------------------------- | --------------- "
+        "| ----- | ----- |",
     ]
     for target in dict.fromkeys(r["target"] for r in records):
         rows = [r for r in records if r["target"] == target]
         ok = sum(r["ok"] for r in rows)
+        answered = [r for r in rows if not r["reason"].startswith(("http_", "transport:"))]
+        stalled = sum(r["reason"] in _STALLED for r in answered)
         outcomes = Counter(r["outcome"] for r in rows if r["outcome"])
         reasons = Counter(r["reason"] for r in rows if not r["ok"])
         latencies = [r["seconds"] for r in rows]
         lines.append(
-            f"| {target} | {ok}/{len(rows)} ({100 * ok / len(rows):.0f}%) "
+            f"| {target} | {_ratio(ok, len(rows))} | {_ratio(stalled, len(answered))} "
             f"| {_counts(outcomes)} | {_counts(reasons)} "
             f"| {percentile(latencies, 50):.1f} | {percentile(latencies, 95):.1f} |"
         )
     return "\n".join(lines)
+
+
+def _ratio(part: int, whole: int) -> str:
+    return f"{part}/{whole} ({100 * part / whole:.0f}%)" if whole else "—"
 
 
 def _counts(counter: Counter) -> str:
