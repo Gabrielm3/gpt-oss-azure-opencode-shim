@@ -37,6 +37,14 @@ class Outcome(str, Enum):
     UPSTREAM_ERROR = "upstream_error"  # transport failure or timeout
 
 
+class PolyfillMode(str, Enum):
+    """How the shim treats answers to forced requests."""
+
+    ON = "on"  # buffer, repair, return the repaired answer
+    OBSERVE = "observe"  # stream unchanged, compute what a repair would do, count it
+    OFF = "off"  # rewrite tool_choice only
+
+
 @dataclass(frozen=True)
 class ForcedToolChoice:
     """The function tools a forced request allows the model to call."""

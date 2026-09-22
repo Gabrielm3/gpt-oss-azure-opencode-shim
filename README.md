@@ -181,7 +181,15 @@ For a forced request, the shim buffers the answer (streamed or not) and inspects
 
 Matching is strict. The JSON must validate against the tool's JSON Schema and use only declared top-level properties, and exactly one candidate tool may match (only the named tool for a forced function). The shim never guesses. For a rescued stream, the reasoning and usage events are kept, and the answer text is replaced by one tool-call chunk with `finish_reason: "tool_calls"`.
 
-Only forced requests are buffered, so other requests keep streaming token by token. Set `SHIM_TOOL_POLYFILL=off` to disable the polyfill and keep only the rewrite.
+Only forced requests are buffered, so other requests keep streaming token by token.
+
+`SHIM_TOOL_POLYFILL` selects the mode:
+
+| Mode | Forced answers | Buffering | Use it to |
+| ---- | -------------- | --------- | --------- |
+| `on` (default) | Repaired into the tool call when possible | Yes, forced requests only | Get the tool call |
+| `observe` | Returned unchanged; the shim evaluates a copy after the stream ends and counts what a repair would have done in `shim_polyfill_observed_total{outcome}` | No | Measure the impact on your own traffic before turning the repair on |
+| `off` | Returned unchanged, not evaluated | No | Keep only the `tool_choice` rewrite (v0.1.1 behavior) |
 
 ### 3. Outcomes and metrics
 
@@ -207,7 +215,7 @@ shim_forced_request_duration_seconds_sum{outcome="rescued"} 15.63
 shim_forced_request_duration_seconds_count{outcome="rescued"} 13.0
 ```
 
-`shim_forced_request_duration_seconds` is the time a forced request waits before its first byte, because the shim buffers it. `native_rate = native / forced` also shows when Azure starts supporting forced tool choice, which is when the polyfill stops being needed.
+`shim_forced_request_duration_seconds` is the time a forced request waits before its first byte, because the shim buffers it. In `observe` mode, `shim_polyfill_observed_total{outcome}` counts what the repair would have done while every answer stays unchanged (`x-shim-outcome: rewritten`). `native_rate = native / forced` also shows when Azure starts supporting forced tool choice, which is when the polyfill stops being needed.
 
 ### 4. Credentials
 
@@ -290,7 +298,7 @@ Do not expose the shim on a network interface. The `Host` check does not stop a 
 | `SHIM_ALLOWED_HOSTS`    | no       | —           | Extra `Host` names to accept, comma-separated        |
 | `SHIM_CONNECT_TIMEOUT`  | no       | `10`        | Seconds to open a connection to Azure                |
 | `SHIM_READ_TIMEOUT`     | no       | `600`       | Maximum seconds between bytes received from Azure    |
-| `SHIM_TOOL_POLYFILL`    | no       | `on`        | `off` keeps the rewrite but skips the answer repair  |
+| `SHIM_TOOL_POLYFILL`    | no       | `on`        | `on`, `observe` or `off` (see Tool-call polyfill)    |
 
 ---
 
