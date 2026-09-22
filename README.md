@@ -1,6 +1,6 @@
 # gpt-oss-azure-opencode-shim
 
-> A small local HTTP shim for **Azure-hosted GPT-OSS models**. It rewrites the forced `tool_choice` values that Azure AI Foundry rejects, keeps the API key out of the client configuration, and forwards everything else to Azure.
+> A small local HTTP shim for **Azure-hosted GPT-OSS models**. It rewrites the forced `tool_choice` values that Azure AI Foundry rejects, turns answers that miss the required tool call back into that tool call, reports what it did on every request, and keeps the API key out of the client configuration.
 
 [![CI](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/actions/workflows/ci.yml/badge.svg)](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -19,6 +19,15 @@ Azure AI Foundry deployments of `gpt-oss-120b` do not support a forced tool choi
 | `tool_choice: "required"` | HTTP 400 `UnsupportedToolUse` |
 
 OpenCode sends `tool_choice: "required"` for structured output (`format: {"type": "json_schema"}`), and other clients force a function to get a guaranteed tool call. The shim rewrites every `tool_choice` other than `"auto"` or `"none"` to `"auto"` before the request reaches Azure.
+
+With `"auto"`, the model sometimes does the work but misses the tool call: it writes the answer as JSON text, or leaks the call's arguments into its reasoning and returns an empty turn. For forced requests, the shim checks the answer against the tool schemas and returns the tool call when exactly one tool matches.
+
+Measured against the real deployment (see [Evaluation](#evaluation)):
+
+| | Rewrite only (v0.1.1) | Rewrite + polyfill (v0.2.0) |
+| --- | --- | --- |
+| OpenCode structured output (10 runs) | 0/10 | **9/10** |
+| Stalled turns on forced requests (no tool call at all) | 7/59 (12%) | **2/56 (4%)** |
 
 Every claim in this README is backed by real requests recorded in [`docs/PROBLEM.md`](docs/PROBLEM.md).
 
@@ -45,7 +54,7 @@ Use the shim when a client **forces** a tool call against this deployment:
 
 You do not need it for plain `opencode run`. OpenCode 1.18.31 sends `tool_choice: "auto"` for normal agent turns, and those work against Azure directly with the `@ai-sdk/openai-compatible` provider.
 
-**Limit:** `"auto"` lets the model choose. The shim turns a rejected request into a completed one, but the model can still answer with text instead of the tool call. In testing, OpenCode structured output through the shim completed, and `gpt-oss-120b` answered in plain text, so OpenCode reported `StructuredOutputError`. See [`docs/PROBLEM.md`](docs/PROBLEM.md#3-end-to-end-results-with-opencode).
+**Limit:** `"auto"` lets the model choose. The polyfill only converts answers that already contain schema-valid JSON. A prose answer ("The files are README.md and …") stays as it is, and the request is counted as `failed`. See [`docs/PROBLEM.md`](docs/PROBLEM.md#6-answers-that-miss-the-tool-call).
 
 ---
 
@@ -148,7 +157,9 @@ The script exits with a non-zero status if any check fails, including authentica
                             ├── reject browser and non-local requests
                             ├── rewrite forced tool_choice → "auto"
                             ├── inject the API key
-                            └── relay response, headers, and SSE stream
+                            ├── forced requests: check answer, repair tool call
+                            ├── relay response, headers, and SSE stream
+                            └── x-shim-outcome header + /metrics
 ```
 
 ### 1. Tool choice rewriting
@@ -159,21 +170,99 @@ For `POST .../chat/completions`, any `tool_choice` other than `"auto"` or `"none
 INFO gpt_oss_shim: sanitized request: tool_choice='required' -> 'auto'
 ```
 
-### 2. Credentials
+### 2. Tool-call polyfill
+
+For a forced request, the shim buffers the answer (streamed or not) and inspects it:
+
+- The model called a tool: the answer passes unchanged (`native`).
+- The answer text is a JSON object, with or without a Markdown fence: it becomes a tool call.
+- The answer text is empty and the reasoning ends with a JSON object: it becomes a tool call. This is how gpt-oss leaks a call it did not emit.
+- Anything else passes unchanged (`failed`).
+
+Matching is strict. The JSON must validate against the tool's JSON Schema and use only declared top-level properties, and exactly one candidate tool may match (only the named tool for a forced function). The shim never guesses. For a rescued stream, the reasoning and usage events are kept, and the answer text is replaced by one tool-call chunk with `finish_reason: "tool_calls"`.
+
+Only forced requests are buffered, so other requests keep streaming token by token. Set `SHIM_TOOL_POLYFILL=off` to disable the polyfill and keep only the rewrite.
+
+### 3. Outcomes and metrics
+
+Every forwarded request gets an `x-shim-outcome` response header:
+
+| Outcome | Meaning |
+| ------- | ------- |
+| `passthrough` | Nothing forced, nothing changed |
+| `rewritten` | Forced `tool_choice` rewritten; answer not inspected (polyfill off, or upstream error status) |
+| `native` | Forced; the model called a tool itself |
+| `rescued` | Forced; the polyfill turned the answer into the tool call |
+| `failed` | Forced; no tool call and nothing to convert |
+| `empty_choices` | Azure answered HTTP 200 with `choices: []`; the shim returns HTTP 502 instead |
+| `upstream_error` | Transport error or timeout (HTTP 502 or 504) |
+
+`GET /metrics` exposes the same outcomes in Prometheus format:
+
+```text
+shim_requests_total{outcome="native"} 59.0
+shim_requests_total{outcome="rescued"} 13.0
+shim_requests_total{outcome="failed"} 3.0
+shim_forced_request_duration_seconds_sum{outcome="rescued"} 15.63
+shim_forced_request_duration_seconds_count{outcome="rescued"} 13.0
+```
+
+`shim_forced_request_duration_seconds` is the time a forced request waits before its first byte, because the shim buffers it. `native_rate = native / forced` also shows when Azure starts supporting forced tool choice, which is when the polyfill stops being needed.
+
+### 4. Credentials
 
 The client sends a placeholder key. The shim sends the real key as both `api-key` and `Authorization: Bearer` (Azure accepts either). The key lives only in the shim's environment file, which `install.sh` creates with mode `600`.
 
-### 3. Header hygiene
+### 5. Header hygiene
 
 The shim sets its own `Content-Type` and drops the client's copy, plus `Authorization`, `Accept-Encoding`, and hop-by-hop headers. Azure rejects a duplicated `Content-Type` (`application/json,application/json`) with HTTP 400.
 
-### 4. Upstream failures
+### 6. Upstream failures
 
 - One shared HTTP client keeps connections to Azure open between requests.
 - Connect timeout 10 s, read timeout 600 s between bytes. A stalled upstream returns HTTP 504 instead of hanging.
 - Transport errors return HTTP 502 with an OpenAI-style `error` body.
 - If a stream breaks mid-way, the shim ends it with a `data: {"error": ...}` event, so the client reports an error instead of a silent, truncated answer.
 - Azure response headers such as `retry-after`, `x-ratelimit-*`, and `x-request-id` reach the client.
+- Logs never contain the Azure resource name: the HTTP client's request lines stay hidden unless `SHIM_LOG_LEVEL=debug`.
+
+---
+
+## Evaluation
+
+[`evals/tool_choice_eval.py`](evals/tool_choice_eval.py) sends 15 forced-tool scenarios ([`evals/scenarios.py`](evals/scenarios.py)) to each target: final-answer steps after a tool result, single-turn extraction into a schema, forced functions, and `"required"` with action tools (7 of them streamed). A run succeeds when the first tool call names the expected tool and its arguments validate against that tool's schema. A turn is stalled when the answer has no tool call at all.
+
+Results on 2026-09-22, `gpt-oss-120b`, 15 scenarios × 4 repetitions per target:
+
+| Target | Strict success | Stalled turns | Outcomes | p50 / p95 |
+| ------ | -------------- | ------------- | -------- | --------- |
+| Direct to Azure | 0/60 (0%) | 16/16 (100%) | 43 × HTTP 400 | 0.2 / 0.3 s |
+| Rewrite only (v0.1.1) | 50/60 (83%) | 7/59 (12%) | rewritten 60 | 0.5 / 0.9 s |
+| Rewrite + polyfill (v0.2.0) | 49/60 (82%) | 2/56 (4%) | native 50, rescued 4, failed 2, rewritten 4 (HTTP 500) | 0.5 / 0.9 s |
+
+What the numbers show:
+
+- Strict success is the same within noise on this synthetic set. The 4 rescued turns were calls to an intermediate tool (`read`, `bash`) that the model had leaked into its reasoning, while the scenario expected the final `StructuredOutput`. In an agent loop that is progress, not a stall, but the strict scorer counts it as a miss.
+- The polyfill cuts stalled turns from 12% to 4%.
+- Azure returned HTTP 500 to 6 requests spread over all three targets. Those are upstream errors, not shim failures.
+
+End-to-end with OpenCode 1.18.31 structured output (`format: json_schema`, 10 runs each, same session):
+
+| Target | Structured output returned | Median latency |
+| ------ | -------------------------- | -------------- |
+| Rewrite only (v0.1.1) | 0/10 (`StructuredOutputError` every time) | 2.9 s |
+| Rewrite + polyfill (v0.2.0) | 9/10 | 3.2 s |
+
+OpenCode's structured-output prompt makes the model write the answer as JSON, which the polyfill can convert. That is why the gain is large here and small on the synthetic set.
+
+Run it yourself (costs a few cents of tokens):
+
+```bash
+python -m evals.tool_choice_eval \
+  --target direct=$UPSTREAM_URL/v1/chat/completions \
+  --target shim=http://127.0.0.1:9526/v1/chat/completions \
+  --repeat 4 --out eval-results.json
+```
 
 ---
 
@@ -197,10 +286,11 @@ Do not expose the shim on a network interface. The `Host` check does not stop a 
 | `AZURE_FOUNDRY_API_KEY` | yes      | —           | Azure resource key                                   |
 | `SHIM_HOST`             | no       | `127.0.0.1` | Bind address                                         |
 | `SHIM_PORT`             | no       | `9526`      | Bind port                                            |
-| `SHIM_LOG_LEVEL`        | no       | `info`      | uvicorn log level                                    |
+| `SHIM_LOG_LEVEL`        | no       | `info`      | Log level for the shim and uvicorn                   |
 | `SHIM_ALLOWED_HOSTS`    | no       | —           | Extra `Host` names to accept, comma-separated        |
 | `SHIM_CONNECT_TIMEOUT`  | no       | `10`        | Seconds to open a connection to Azure                |
 | `SHIM_READ_TIMEOUT`     | no       | `600`       | Maximum seconds between bytes received from Azure    |
+| `SHIM_TOOL_POLYFILL`    | no       | `on`        | `off` keeps the rewrite but skips the answer repair  |
 
 ---
 
@@ -229,15 +319,15 @@ cd gpt-oss-azure-opencode-shim
 python3 -m venv .venv
 ./.venv/bin/pip install -e ".[dev]"
 ./.venv/bin/pytest -v
-./.venv/bin/ruff check src tests
-./.venv/bin/ruff format --check src tests
+./.venv/bin/ruff check src tests evals
+./.venv/bin/ruff format --check src tests evals
 ```
 
 ---
 
 ## Contributing
 
-Issues and PRs are welcome. Run `pytest`, `ruff check src tests`, and `ruff format --check src tests` before opening a PR.
+Issues and PRs are welcome. Run `pytest`, `ruff check src tests evals`, and `ruff format --check src tests evals` before opening a PR.
 
 ---
 
