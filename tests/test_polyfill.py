@@ -292,3 +292,86 @@ def test_stream_without_any_choice_is_reported_and_ends_with_error_event() -> No
     events = _events(repaired)
     assert "[DONE]" not in events
     assert events[-1]["error"]["type"] == "empty_choices"
+
+
+# --- tool call leaked into the reasoning channel ----------------------------
+
+READ = {
+    "type": "function",
+    "function": {
+        "name": "read",
+        "parameters": {
+            "type": "object",
+            "properties": {"filePath": {"type": "string"}},
+            "required": ["filePath"],
+        },
+    },
+}
+LEAKED = 'Let\'s open the whole file.{"filePath": "pyproject.toml"}'
+
+
+def test_completion_with_tool_call_leaked_into_reasoning_is_rescued() -> None:
+    forced = forced_tool_choice({"tool_choice": "required", "tools": [GLOB, READ, STRUCTURED]})
+    body = _completion({"role": "assistant", "content": "", "reasoning_content": LEAKED})
+
+    repaired, outcome = repair_completion(body, forced)
+
+    assert outcome is Outcome.RESCUED
+    message = json.loads(repaired)["choices"][0]["message"]
+    call = message["tool_calls"][0]["function"]
+    assert call["name"] == "read"
+    assert json.loads(call["arguments"]) == {"filePath": "pyproject.toml"}
+    assert message["reasoning_content"] == LEAKED
+
+
+def test_reasoning_json_must_end_the_reasoning() -> None:
+    forced = forced_tool_choice({"tool_choice": "required", "tools": [READ]})
+    reasoning = 'Maybe {"filePath": "pyproject.toml"} but first think more.'
+    body = _completion({"role": "assistant", "content": "", "reasoning_content": reasoning})
+
+    _, outcome = repair_completion(body, forced)
+
+    assert outcome is Outcome.FAILED
+
+
+def test_reasoning_is_ignored_when_the_model_wrote_prose() -> None:
+    forced = forced_tool_choice({"tool_choice": "required", "tools": [READ]})
+    body = _completion({"role": "assistant", "content": "Here it is.", "reasoning_content": LEAKED})
+
+    _, outcome = repair_completion(body, forced)
+
+    assert outcome is Outcome.FAILED
+
+
+def test_nested_json_at_the_end_of_reasoning_is_parsed_whole() -> None:
+    forced = forced_tool_choice({"tool_choice": "required", "tools": [GLOB, STRUCTURED]})
+    reasoning = 'Done. {"files": ["a.md", "b.md"]}'
+    body = _completion({"role": "assistant", "content": None, "reasoning_content": reasoning})
+
+    repaired, outcome = repair_completion(body, forced)
+
+    assert outcome is Outcome.RESCUED
+    call = json.loads(repaired)["choices"][0]["message"]["tool_calls"][0]["function"]
+    assert json.loads(call["arguments"]) == {"files": ["a.md", "b.md"]}
+
+
+def test_stream_with_tool_call_leaked_into_reasoning_is_rescued() -> None:
+    forced = forced_tool_choice({"tool_choice": "required", "tools": [GLOB, READ]})
+    body = _sse(
+        _chunk({"role": "assistant", "reasoning_content": "Let's open the whole file."}),
+        _chunk({"reasoning_content": '{"filePath": "pyproject.toml"}'}),
+        _chunk({"content": ""}, "stop"),
+        "[DONE]",
+    )
+
+    repaired, outcome = repair_stream(body, forced)
+
+    assert outcome is Outcome.RESCUED
+    events = _events(repaired)
+    calls = [
+        tc
+        for e in events[:-1]
+        for c in e.get("choices", [])
+        for tc in c["delta"].get("tool_calls", [])
+    ]
+    assert [c["function"]["name"] for c in calls] == ["read"]

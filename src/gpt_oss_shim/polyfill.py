@@ -45,6 +45,8 @@ class ForcedToolChoice:
 
 
 _FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
+# Upper bound on '{' positions tried when looking for JSON at the end of text.
+_MAX_BRACE_SCAN = 64
 _EMPTY_CHOICES_ERROR = {
     "error": {"message": "upstream returned no choices", "type": Outcome.EMPTY_CHOICES.value}
 }
@@ -116,6 +118,52 @@ def _accepts(schema: Any, value: dict[str, Any]) -> bool:
         return False
 
 
+def trailing_json_object(text: str) -> dict[str, Any] | None:
+    """Return the JSON object that ends ``text``, or ``None``.
+
+    gpt-oss sometimes writes a tool call's arguments at the end of its
+    reasoning instead of emitting the call. Only an object that closes the
+    text counts; JSON in the middle of reasoning is ignored.
+    """
+    stripped = text.rstrip()
+    if not stripped.endswith("}"):
+        return None
+    end = len(stripped)
+    for _ in range(_MAX_BRACE_SCAN):
+        start = stripped.rfind("{", 0, end)
+        if start < 0:
+            return None
+        try:
+            value = json.loads(stripped[start:])
+        except ValueError:
+            end = start
+            continue
+        return value if isinstance(value, dict) else None
+    return None
+
+
+def answer_as_tool_call(
+    content: str, reasoning: str, tools: Iterable[Mapping[str, Any]]
+) -> tuple[str, Any] | None:
+    """Find a tool call hidden in a text answer: ``(tool name, arguments)``.
+
+    First the answer text itself (JSON, maybe fenced). If the model wrote no
+    text at all, then a JSON object at the end of its reasoning.
+    """
+    tools = tuple(tools)
+    value = parse_json_text(content)
+    name = match_tool(value, tools)
+    if name is None and not content.strip():
+        value = trailing_json_object(reasoning)
+        name = match_tool(value, tools)
+    return (name, value) if name is not None else None
+
+
+def _reasoning(message: Mapping[str, Any]) -> str:
+    """Reasoning text of a message or delta; providers use either field name."""
+    return message.get("reasoning_content") or message.get("reasoning") or ""
+
+
 def _tool_call(name: str, arguments: Any) -> dict[str, Any]:
     return {
         "id": f"call_{uuid.uuid4().hex[:24]}",
@@ -143,10 +191,10 @@ def repair_completion(body: bytes, forced: ForcedToolChoice) -> tuple[bytes, Out
     if message.get("tool_calls"):
         return body, Outcome.NATIVE
 
-    value = parse_json_text(message.get("content") or "")
-    name = match_tool(value, forced.tools)
-    if name is None:
+    found = answer_as_tool_call(message.get("content") or "", _reasoning(message), forced.tools)
+    if found is None:
         return body, Outcome.FAILED
+    name, value = found
 
     message["tool_calls"] = [_tool_call(name, value)]
     message["content"] = None
@@ -167,11 +215,15 @@ def repair_stream(body: bytes, forced: ForcedToolChoice) -> tuple[bytes, Outcome
     if any((choice.get("delta") or {}).get("tool_calls") for choice in choices):
         return body, Outcome.NATIVE
 
-    text = "".join((choice.get("delta") or {}).get("content") or "" for choice in choices)
-    value = parse_json_text(text)
-    name = match_tool(value, forced.tools)
-    if name is None:
+    deltas = [choice.get("delta") or {} for choice in choices]
+    found = answer_as_tool_call(
+        "".join(d.get("content") or "" for d in deltas),
+        "".join(_reasoning(d) for d in deltas),
+        forced.tools,
+    )
+    if found is None:
         return body, Outcome.FAILED
+    name, value = found
 
     kept, usage_only = [], []
     for event in parsed:
