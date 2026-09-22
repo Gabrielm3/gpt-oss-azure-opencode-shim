@@ -15,6 +15,7 @@ from .polyfill import Outcome
 # Forced requests are buffered until the upstream finishes, so their duration
 # is the latency the client sees before the first byte.
 _FORCED_BUCKETS = (0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300, 600)
+_POLYFILL_OUTCOMES = (Outcome.NATIVE, Outcome.RESCUED, Outcome.FAILED, Outcome.EMPTY_CHOICES)
 
 
 class Metrics:
@@ -37,16 +38,27 @@ class Metrics:
             buckets=_FORCED_BUCKETS,
             registry=self.registry,
         )
+        self.observed = Counter(
+            "shim_polyfill_observed",
+            "Forced requests in observe mode, by the outcome a repair would have had.",
+            ["outcome"],
+            registry=self.registry,
+        )
         for outcome in Outcome:
             self.requests.labels(outcome.value)
-        for outcome in (Outcome.NATIVE, Outcome.RESCUED, Outcome.FAILED, Outcome.EMPTY_CHOICES):
+        for outcome in _POLYFILL_OUTCOMES:
             self.forced_duration.labels(outcome.value)
+            self.observed.labels(outcome.value)
 
     def record(self, outcome: Outcome, *, forced_seconds: float | None = None) -> None:
         """Count one request; ``forced_seconds`` is set for polyfilled requests."""
         self.requests.labels(outcome.value).inc()
         if forced_seconds is not None:
             self.forced_duration.labels(outcome.value).observe(forced_seconds)
+
+    def record_observed(self, outcome: Outcome) -> None:
+        """Count what the polyfill would have done to an answer it did not change."""
+        self.observed.labels(outcome.value).inc()
 
     def render(self) -> bytes:
         """Return the Prometheus text exposition of this registry."""

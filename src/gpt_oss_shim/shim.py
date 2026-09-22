@@ -50,8 +50,9 @@ SHIM_CONNECT_TIMEOUT
 SHIM_READ_TIMEOUT
     Maximum seconds between bytes received from the upstream (default: ``600``).
 SHIM_TOOL_POLYFILL
-    ``on`` or ``off``: convert JSON text answers to forced requests into tool
-    calls (default: ``on``).
+    ``on`` (default): repair answers to forced requests into the tool call.
+    ``observe``: leave answers unchanged and only count what a repair would do
+    (``shim_polyfill_observed_total``). ``off``: rewrite ``tool_choice`` only.
 """
 
 from __future__ import annotations
@@ -62,7 +63,7 @@ import logging
 import os
 import sys
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -76,12 +77,13 @@ from .metrics import Metrics
 from .polyfill import (
     ForcedToolChoice,
     Outcome,
+    PolyfillMode,
     forced_tool_choice,
     repair_completion,
     repair_stream,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 logger = logging.getLogger("gpt_oss_shim")
 
@@ -158,7 +160,7 @@ def _load_config() -> dict[str, Any]:
         "allowed_hosts": _LOOPBACK_HOSTS | extra_hosts,
         "connect_timeout": _env_number("SHIM_CONNECT_TIMEOUT", _DEFAULT_CONNECT_TIMEOUT),
         "read_timeout": _env_number("SHIM_READ_TIMEOUT", _DEFAULT_READ_TIMEOUT),
-        "tool_polyfill": _env_flag("SHIM_TOOL_POLYFILL", default=True),
+        "tool_polyfill": _env_polyfill_mode("SHIM_TOOL_POLYFILL"),
     }
 
 
@@ -166,17 +168,19 @@ _TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
 _FALSE_WORDS = frozenset({"0", "false", "no", "off"})
 
 
-def _env_flag(name: str, *, default: bool) -> bool:
-    """Read an on/off flag from the environment, or fail with a clear error."""
+def _env_polyfill_mode(name: str) -> PolyfillMode:
+    """Read ``on``, ``observe`` or ``off`` from the environment (default ``on``)."""
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
-        return default
+        return PolyfillMode.ON
     word = raw.strip().lower()
     if word in _TRUE_WORDS:
-        return True
+        return PolyfillMode.ON
     if word in _FALSE_WORDS:
-        return False
-    raise RuntimeError(f"{name} must be on or off, got {raw!r}")
+        return PolyfillMode.OFF
+    if word == PolyfillMode.OBSERVE.value:
+        return PolyfillMode.OBSERVE
+    raise RuntimeError(f"{name} must be on, observe or off, got {raw!r}")
 
 
 def _env_number(name: str, default: float) -> float:
@@ -366,7 +370,7 @@ def create_app(
 
     upstream = config["upstream"]
     auth_headers = build_upstream_headers(config)
-    tool_polyfill = config.get("tool_polyfill", True)
+    mode = PolyfillMode(config.get("tool_polyfill", PolyfillMode.ON))
 
     def finish(
         response: Response, outcome: Outcome, forced_seconds: float | None = None
@@ -374,6 +378,13 @@ def create_app(
         response.headers[OUTCOME_HEADER] = outcome.value
         metrics.record(outcome, forced_seconds=forced_seconds)
         return response
+
+    def observe(content: bytes, forced: ForcedToolChoice, *, is_sse: bool) -> None:
+        """Count what a repair would do, without changing the answer."""
+        repair = repair_stream if is_sse else repair_completion
+        _, outcome = repair(content, forced)
+        metrics.record_observed(outcome)
+        logger.info("observed forced tool_choice outcome=%s (answer unchanged)", outcome.value)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -399,7 +410,7 @@ def create_app(
 
         if is_chat:
             payload = _json_object(body)
-            if tool_polyfill and payload is not None:
+            if mode is not PolyfillMode.OFF and payload is not None:
                 forced = forced_tool_choice(payload)
             body, notes = sanitize_chat_body(body)
             for note in notes:
@@ -429,10 +440,19 @@ def create_app(
 
         headers = forwardable_response_headers(upstream_response.headers)
         is_sse = "text/event-stream" in upstream_response.headers.get("content-type", "")
+        ok = upstream_response.status_code == 200
+        observing = forced is not None and ok and mode is PolyfillMode.OBSERVE
 
-        if is_sse and forced is None:
+        if is_sse and (forced is None or observing):
+            on_complete = None
+            if observing:
+                observed_request = forced
+
+                def on_complete(body: bytes) -> None:
+                    observe(body, observed_request, is_sse=True)
+
             response = StreamingResponse(
-                relay_sse(upstream_response),
+                relay_sse(upstream_response, on_complete=on_complete),
                 status_code=upstream_response.status_code,
                 headers=headers,
             )
@@ -445,8 +465,9 @@ def create_app(
         finally:
             await upstream_response.aclose()
 
-        ok = upstream_response.status_code == 200
-        if forced is not None and ok:
+        if observing:
+            observe(content, forced, is_sse=False)
+        elif forced is not None and ok:
             # The whole answer is needed before it can be checked against the
             # tool schemas, so forced requests are buffered, streamed or not.
             repair = repair_stream if is_sse else repair_completion
@@ -536,22 +557,39 @@ def forwardable_response_headers(headers: httpx.Headers) -> dict[str, str]:
     return {k: v for k, v in headers.items() if k.lower() not in _STRIPPED_RESPONSE_HEADERS}
 
 
-async def relay_sse(response: httpx.Response) -> AsyncIterator[bytes]:
+async def relay_sse(
+    response: httpx.Response,
+    *,
+    on_complete: Callable[[bytes], None] | None = None,
+) -> AsyncIterator[bytes]:
     """Relay an upstream SSE body, ending with an error event if it breaks.
 
     The status line and headers are already sent when a stream breaks, so the
     failure can only be reported in-band. OpenAI-compatible clients (the
     OpenAI SDK, the AI SDK used by OpenCode) surface a ``data: {"error": ...}``
     event as an error instead of treating the truncated stream as complete.
+
+    ``on_complete`` receives a copy of the whole body once the stream ends
+    normally. It is not called for a broken stream.
     """
+    copy: list[bytes] = []
     try:
         async for chunk in response.aiter_bytes():
+            if on_complete is not None:
+                copy.append(chunk)
             yield chunk
     except httpx.HTTPError as exc:
         logger.error("upstream stream interrupted: %s: %s", type(exc).__name__, exc)
         _, payload = _upstream_error_payload(exc)
         # The leading blank line ends any event that was cut off mid-way.
         yield b"\n\ndata: " + json.dumps(payload).encode() + b"\n\n"
+    else:
+        if on_complete is not None:
+            try:
+                on_complete(b"".join(copy))
+            except Exception:
+                # Measuring must never break the answer the client already has.
+                logger.exception("failed to evaluate a streamed answer in observe mode")
     finally:
         await response.aclose()
 

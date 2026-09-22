@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from gpt_oss_shim.polyfill import PolyfillMode
 from gpt_oss_shim.shim import _load_config
 
 REQUIRED = {
@@ -94,12 +95,21 @@ def test_invalid_port_raises(env: pytest.MonkeyPatch) -> None:
 
 
 def test_tool_polyfill_is_on_by_default(env: pytest.MonkeyPatch) -> None:
-    assert _load_config()["tool_polyfill"] is True
+    assert _load_config()["tool_polyfill"] is PolyfillMode.ON
 
 
-@pytest.mark.parametrize(("value", "expected"), [("off", False), ("0", False), ("ON", True)])
-def test_tool_polyfill_flag_is_read_from_env(
-    env: pytest.MonkeyPatch, value: str, expected: bool
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("off", PolyfillMode.OFF),
+        ("0", PolyfillMode.OFF),
+        ("ON", PolyfillMode.ON),
+        ("true", PolyfillMode.ON),
+        ("Observe", PolyfillMode.OBSERVE),
+    ],
+)
+def test_tool_polyfill_mode_is_read_from_env(
+    env: pytest.MonkeyPatch, value: str, expected: PolyfillMode
 ) -> None:
     env.setenv("SHIM_TOOL_POLYFILL", value)
 

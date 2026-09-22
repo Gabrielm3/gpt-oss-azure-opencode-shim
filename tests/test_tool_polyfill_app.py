@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from gpt_oss_shim.polyfill import PolyfillMode
+
 STRUCTURED = {
     "type": "function",
     "function": {
@@ -92,7 +94,7 @@ async def test_forced_completion_with_native_tool_call_is_marked_native(shim_cli
 
 
 async def test_polyfill_can_be_disabled(shim_client) -> None:
-    async with shim_client(json_text_stream, tool_polyfill=False) as client:
+    async with shim_client(json_text_stream, tool_polyfill=PolyfillMode.OFF) as client:
         response = await client.post(
             "/v1/chat/completions", json={**FORCED_REQUEST, "stream": True}
         )
@@ -163,3 +165,65 @@ async def test_metrics_are_isolated_per_app(shim_client) -> None:
         text = (await client.get("/metrics")).text
 
     assert 'shim_requests_total{outcome="rescued"} 0.0' in text
+
+
+# --- observe mode -------------------------------------------------------------
+
+
+async def test_observe_mode_streams_the_answer_unchanged_and_counts_what_it_would_do(
+    shim_client,
+) -> None:
+    body = _sse(_chunk({"content": '{"files": ["a.md"]}'}, "stop"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, stream=Stream(body)
+        )
+
+    async with shim_client(handler, tool_polyfill=PolyfillMode.OBSERVE) as client:
+        response = await client.post(
+            "/v1/chat/completions", json={**FORCED_REQUEST, "stream": True}
+        )
+        metrics = (await client.get("/metrics")).text
+
+    assert response.content == body
+    assert response.headers["x-shim-outcome"] == "rewritten"
+    assert 'shim_polyfill_observed_total{outcome="rescued"} 1.0' in metrics
+    assert 'shim_requests_total{outcome="rewritten"} 1.0' in metrics
+    assert 'shim_requests_total{outcome="rescued"} 0.0' in metrics
+
+
+async def test_observe_mode_leaves_completions_unchanged(shim_client) -> None:
+    completion = _completion({"role": "assistant", "content": '{"files": ["a.md"]}'})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=completion)
+
+    async with shim_client(handler, tool_polyfill=PolyfillMode.OBSERVE) as client:
+        response = await client.post("/v1/chat/completions", json=FORCED_REQUEST)
+        metrics = (await client.get("/metrics")).text
+
+    assert response.json() == completion
+    assert response.headers["x-shim-outcome"] == "rewritten"
+    assert 'shim_polyfill_observed_total{outcome="rescued"} 1.0' in metrics
+
+
+async def test_observe_mode_skips_streams_that_break(shim_client) -> None:
+    class Broken(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield _sse(_chunk({"content": '{"files": '}))[: -len(b"data: [DONE]\n\n")]
+            raise httpx.ReadError("reset")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=Broken())
+
+    async with shim_client(handler, tool_polyfill=PolyfillMode.OBSERVE) as client:
+        response = await client.post(
+            "/v1/chat/completions", json={**FORCED_REQUEST, "stream": True}
+        )
+        metrics = (await client.get("/metrics")).text
+
+    assert b'"type": "upstream_error"' in response.content
+    assert "shim_polyfill_observed_total{" in metrics
+    assert 'outcome="rescued"} 1.0' not in metrics
+    assert 'outcome="failed"} 1.0' not in metrics
