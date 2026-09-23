@@ -26,8 +26,9 @@ Measured against the real deployment (see [Evaluation](#evaluation)):
 
 | | Rewrite only (v0.1.1) | Rewrite + polyfill (v0.2.0) |
 | --- | --- | --- |
-| OpenCode structured output (10 runs) | 0/10 | **9/10** |
-| Stalled turns on forced requests (no tool call at all; upstream HTTP 500s excluded) | 7/59 (12%) | **2/56 (4%)** |
+| OpenCode structured output (10 runs, 95% CI) | 0/10 (0–28%) | **9/10 (60–98%)** |
+
+On the 15-scenario synthetic set the polyfill cut stalled turns from 12% to 4% on 2026-09-22, but a rerun on 2026-09-23 found both arms equal within noise (5% and 7%). The structured-output gain is the one that holds.
 
 Every claim in this README is backed by real requests recorded in [`docs/PROBLEM.md`](docs/PROBLEM.md).
 
@@ -312,6 +313,15 @@ End-to-end with OpenCode 1.18.31 structured output (`format: json_schema`, 10 ru
 | Rewrite + polyfill (v0.2.0) | 9/10 | 3.2 s |
 
 OpenCode's structured-output prompt makes the model write the answer as JSON, which the polyfill can convert. That is why the gain is large here and small on the synthetic set.
+
+Rerun on 2026-09-23 with v0.3.1, which also scores progress (the first tool call is any offered tool with schema-valid arguments, as an agent loop needs) and prints 95% Wilson intervals. Both arms ran from the same checkout in the same session; the rewrite-only arm is the polyfill in `observe` mode, which returns the upstream answer unchanged:
+
+| Target | Strict success | Progress | Stalled turns |
+| ------ | -------------- | -------- | ------------- |
+| Rewrite only (`observe`) | 55/60 (92%, CI 82–96%) | 55/60 (92%, CI 82–96%) | 3/60 (5%, CI 2–14%) |
+| Rewrite + polyfill (`on`) | 53/60 (88%, CI 78–94%) | 56/60 (93%, CI 84–97%) | 4/60 (7%, CI 3–16%) |
+
+On this day the two arms are the same within noise: the intervals overlap on every metric, and the polyfill rescued 2 turns out of 60. The rewrite-only arm stalled on 5% of turns against 12% the day before, with the same scenarios and shim logic, so the upstream model's behavior varies from day to day by more than the polyfill changes it on this set. The synthetic set does not show a polyfill gain; the OpenCode structured-output result above does. Production rates will come from the outcome log (see [Production outcomes](#production-outcomes)).
 
 Run it yourself (costs a few cents of tokens):
 
