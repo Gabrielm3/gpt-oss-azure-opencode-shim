@@ -13,9 +13,10 @@ Next to the traces, an outcome log gets one small line per chat request
 over days with ``python -m evals.report`` even across restarts.
 
 Both kinds of file are daily and bounded: files older than
-``retention_days`` are deleted, and the oldest days go first when the
-directory passes ``max_bytes``. When today's traces alone fill the cap, new
-traces are dropped (``on_drop``) while the tiny outcome lines are still kept.
+``retention_days`` are deleted, and the oldest days of traces go first when
+the directory passes ``max_bytes``. Outcome logs leave only through retention.
+When today's traces alone fill the cap, new traces are dropped (``on_drop``)
+while the tiny outcome lines are still kept.
 Only files named ``traces-YYYY-MM-DD.jsonl`` or ``outcomes-YYYY-MM-DD.jsonl``
 are ever deleted.
 """
@@ -158,9 +159,13 @@ class TraceWriter:
         self._pruned_on = today
 
     def _make_room(self, needed: int, today: date) -> bool:
-        """Delete the oldest past days until ``needed`` bytes fit under the cap."""
+        """Delete the oldest past days of traces until ``needed`` bytes fit under the cap."""
         while sum(size for _, size in self._files.values()) + needed > self.max_bytes:
-            past = [(day, path) for path, (day, _) in self._files.items() if day < today]
+            past = [
+                (day, path)
+                for path, (day, _) in self._files.items()
+                if day < today and path.name.startswith("traces-")
+            ]
             if not past:
                 return False
             _, oldest = min(past)

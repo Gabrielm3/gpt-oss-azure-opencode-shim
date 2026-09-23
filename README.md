@@ -260,7 +260,7 @@ SHIM_TRACE_DIR=~/.local/share/gpt-oss-azure-opencode-shim/traces
 
 A trace holds the candidate tools, the original `tool_choice` and the raw upstream answer. **It never holds `messages`**, so prompts, file contents and tool results stay out; the directory is created `0700` and the files `0600`. The recorded answer is still model output, so review a trace before committing it.
 
-Traces go to one file per day and are bounded. Each record repeats the tool definitions (36 requests produced 478 KB in testing), so the shim deletes days older than `SHIM_TRACE_RETENTION_DAYS` (default 14) and deletes the oldest days first when the directory passes `SHIM_TRACE_MAX_MB` (default 100). When today's traces alone reach the cap, new traces are dropped until the next day and counted in `shim_traces_dropped_total`. Only files named `traces-YYYY-MM-DD.jsonl` or `outcomes-YYYY-MM-DD.jsonl` are ever deleted.
+Traces go to one file per day and are bounded. Each record repeats the tool definitions (36 requests produced 478 KB in testing), so the shim deletes days older than `SHIM_TRACE_RETENTION_DAYS` (default 14) and deletes the oldest days of traces first when the directory passes `SHIM_TRACE_MAX_MB` (default 100); outcome logs leave only through retention. When today's traces alone reach the cap, new traces are dropped until the next day and counted in `shim_traces_dropped_total`. Only files named `traces-YYYY-MM-DD.jsonl` or `outcomes-YYYY-MM-DD.jsonl` are ever deleted.
 
 ### Production outcomes
 

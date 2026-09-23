@@ -164,3 +164,18 @@ def test_outcome_log_is_kept_when_traces_hit_the_cap(tmp_path: Path) -> None:
     _log(writer)
 
     assert (tmp_path / "outcomes-2026-09-01.jsonl").exists()
+
+
+def test_size_cap_never_evicts_past_outcome_logs(tmp_path: Path) -> None:
+    clock = Clock(day=1)
+    writer = TraceWriter(tmp_path, frozenset({Outcome.FAILED}), max_bytes=1500, now=clock)
+    _log(writer)
+    _write(writer, b"x" * 400)
+
+    clock.day = 2
+    for _ in range(3):
+        _write(writer, b"x" * 400)
+
+    names = _names(tmp_path)
+    assert "traces-2026-09-01.jsonl" not in names
+    assert "outcomes-2026-09-01.jsonl" in names, "outcome lines leave only through retention"
