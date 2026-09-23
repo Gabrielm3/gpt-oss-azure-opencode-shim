@@ -102,7 +102,7 @@ from .traces import (
     TraceWriter,
 )
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 logger = logging.getLogger("gpt_oss_shim")
 
