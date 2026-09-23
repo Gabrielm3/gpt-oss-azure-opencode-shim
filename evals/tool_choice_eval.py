@@ -2,8 +2,12 @@
 
 Each scenario in ``evals/scenarios.py`` is sent to every target. A run
 succeeds when the first tool call names the expected tool and its arguments
-validate against that tool's JSON Schema. The report shows the success rate,
-the ``x-shim-outcome`` values seen, and latency per target.
+validate against that tool's JSON Schema. A run makes progress when the first
+tool call names any offered tool with valid arguments: in an agent loop, a
+schema-valid call to an intermediate tool (``read`` before the final
+``StructuredOutput``) moves the task forward even though the strict check
+fails. The report shows both rates and the stalled turns with 95% Wilson
+intervals, the ``x-shim-outcome`` values seen, and latency per target.
 
 Usage::
 
@@ -32,6 +36,7 @@ import httpx
 from jsonschema.validators import validator_for
 
 from evals.scenarios import SCENARIOS
+from evals.stats import format_rate
 
 OUTCOME_HEADER = "x-shim-outcome"
 
@@ -86,6 +91,12 @@ def score(scenario: dict[str, Any], status: int, body: bytes, *, stream: bool) -
     return True, "ok"
 
 
+def progress(scenario: dict[str, Any], status: int, body: bytes, *, stream: bool) -> bool:
+    """Return ``True`` when the first tool call is any offered tool with valid arguments."""
+    ok, _ = score({**scenario, "expect_tool": None}, status, body, stream=stream)
+    return ok
+
+
 def percentile(values: Sequence[float], pct: float) -> float | None:
     """Nearest-rank percentile; ``None`` for an empty sequence."""
     if not values:
@@ -127,6 +138,7 @@ def run_once(
         "scenario": scenario["id"],
         "stream": stream,
         "ok": ok,
+        "progress": bool(status) and progress(scenario, status, body, stream=stream),
         "reason": reason,
         "outcome": outcome,
         "seconds": round(seconds, 3),
@@ -141,33 +153,33 @@ def summarize(records: list[dict[str, Any]]) -> str:
     """Render a Markdown table: one row per target.
 
     ``Success`` is strict: the expected tool with schema-valid arguments.
+    ``Progress`` accepts any offered tool with schema-valid arguments.
     ``Stalled`` counts answers with no tool call at all, over the answers that
     came back with HTTP 200 (upstream errors are reported, not counted there).
     """
     lines = [
-        "| Target | Success | Stalled turns | Outcomes (x-shim-outcome) | Failure reasons "
-        "| p50 s | p95 s |",
-        "| ------ | ------- | ------------- | ------------------------- | --------------- "
-        "| ----- | ----- |",
+        "| Target | Success | Progress | Stalled turns | Outcomes (x-shim-outcome) "
+        "| Failure reasons | p50 s | p95 s |",
+        "| ------ | ------- | -------- | ------------- | ------------------------- "
+        "| --------------- | ----- | ----- |",
     ]
     for target in dict.fromkeys(r["target"] for r in records):
         rows = [r for r in records if r["target"] == target]
         ok = sum(r["ok"] for r in rows)
+        # Records saved before progress existed: a strict success is progress too.
+        moved = sum(r.get("progress", r["ok"]) for r in rows)
         answered = [r for r in rows if not r["reason"].startswith(("http_", "transport:"))]
         stalled = sum(r["reason"] in _STALLED for r in answered)
         outcomes = Counter(r["outcome"] for r in rows if r["outcome"])
         reasons = Counter(r["reason"] for r in rows if not r["ok"])
         latencies = [r["seconds"] for r in rows]
         lines.append(
-            f"| {target} | {_ratio(ok, len(rows))} | {_ratio(stalled, len(answered))} "
+            f"| {target} | {format_rate(ok, len(rows))} | {format_rate(moved, len(rows))} "
+            f"| {format_rate(stalled, len(answered))} "
             f"| {_counts(outcomes)} | {_counts(reasons)} "
             f"| {percentile(latencies, 50):.1f} | {percentile(latencies, 95):.1f} |"
         )
     return "\n".join(lines)
-
-
-def _ratio(part: int, whole: int) -> str:
-    return f"{part}/{whole} ({100 * part / whole:.0f}%)" if whole else "—"
 
 
 def _counts(counter: Counter) -> str:

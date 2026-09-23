@@ -118,5 +118,47 @@ def test_summary_counts_stalled_turns_separately() -> None:
 
     row = summarize(records).splitlines()[2]
 
-    assert "| 1/4 (25%) |" in row
-    assert "| 1/3 (33%) |" in row, "stalled turns exclude upstream HTTP errors"
+    assert "| 1/4 (25%, 95% CI" in row
+    assert "| 1/3 (33%, 95% CI" in row, "stalled turns exclude upstream HTTP errors"
+
+
+def test_progress_accepts_any_offered_tool_with_valid_arguments() -> None:
+    from evals.tool_choice_eval import progress
+
+    other_tool = _completion({"tool_calls": [_call("search_docs", "{}")]})
+    bad_args = _completion({"tool_calls": [_call("get_weather", '{"city": 42}')]})
+    text = _completion({"content": "sunny"})
+
+    assert progress(SCENARIO, 200, other_tool, stream=False) is True
+    assert progress(SCENARIO, 200, bad_args, stream=False) is False
+    assert progress(SCENARIO, 200, text, stream=False) is False
+    assert progress(SCENARIO, 500, other_tool, stream=False) is False
+
+
+def test_summary_reports_progress_with_confidence_intervals() -> None:
+    from evals.tool_choice_eval import summarize
+
+    records = [
+        {
+            "target": "t",
+            "ok": True,
+            "progress": True,
+            "reason": "ok",
+            "outcome": "native",
+            "seconds": 1.0,
+        },
+        {
+            "target": "t",
+            "ok": False,
+            "progress": True,
+            "reason": "wrong_tool:read",
+            "outcome": "rescued",
+            "seconds": 1.0,
+        },
+    ]
+
+    header, _, row = summarize(records).splitlines()
+
+    assert "Progress" in header
+    assert "| 1/2 (50%, 95% CI" in row
+    assert "| 2/2 (100%, 95% CI" in row
