@@ -44,6 +44,11 @@ class Metrics:
             ["outcome"],
             registry=self.registry,
         )
+        self.traces_dropped = Counter(
+            "shim_traces_dropped",
+            "Traces not written because the trace directory reached its size cap.",
+            registry=self.registry,
+        )
         for outcome in Outcome:
             self.requests.labels(outcome.value)
         for outcome in _POLYFILL_OUTCOMES:
@@ -59,6 +64,10 @@ class Metrics:
     def record_observed(self, outcome: Outcome) -> None:
         """Count what the polyfill would have done to an answer it did not change."""
         self.observed.labels(outcome.value).inc()
+
+    def record_trace_dropped(self) -> None:
+        """Count one trace lost to the size cap."""
+        self.traces_dropped.inc()
 
     def render(self) -> bytes:
         """Return the Prometheus text exposition of this registry."""

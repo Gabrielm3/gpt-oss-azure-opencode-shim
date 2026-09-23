@@ -149,3 +149,27 @@ def test_unknown_trace_outcome_raises(env: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(RuntimeError, match="SHIM_TRACE_OUTCOMES"):
         _load_config()
+
+
+def test_trace_retention_defaults(env: pytest.MonkeyPatch) -> None:
+    config = _load_config()
+
+    assert config["trace_max_bytes"] == 100 * 1024 * 1024
+    assert config["trace_retention_days"] == 14
+
+
+def test_trace_retention_is_read_from_env(env: pytest.MonkeyPatch) -> None:
+    env.setenv("SHIM_TRACE_MAX_MB", "2.5")
+    env.setenv("SHIM_TRACE_RETENTION_DAYS", "3")
+
+    config = _load_config()
+
+    assert config["trace_max_bytes"] == int(2.5 * 1024 * 1024)
+    assert config["trace_retention_days"] == 3
+
+
+def test_fractional_retention_days_raise(env: pytest.MonkeyPatch) -> None:
+    env.setenv("SHIM_TRACE_RETENTION_DAYS", "1.5")
+
+    with pytest.raises(RuntimeError, match="SHIM_TRACE_RETENTION_DAYS"):
+        _load_config()

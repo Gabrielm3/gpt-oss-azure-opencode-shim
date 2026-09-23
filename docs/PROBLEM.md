@@ -192,3 +192,21 @@ polyfill rescued 4 turns there, all calls to an intermediate tool the model had
 leaked into its reasoning, so the strict scorer did not count them. Azure
 answered 6 requests, spread over all three targets, with HTTP 500. Those are
 excluded from the stalled-turn ratio.
+
+Rerun on 2026-09-23 with v0.3.1 (15 × 4 runs per arm, both arms from the same
+checkout at the same time; rewrite-only is `SHIM_TOOL_POLYFILL=observe`, which
+leaves answers unchanged). Rates with 95% Wilson intervals:
+
+| Target | Strict success | Progress (any offered tool, valid arguments) | Stalled turns |
+|--------|----------------|----------------------------------------------|---------------|
+| Rewrite only (observe) | 55/60 (82–96%) | 55/60 (82–96%) | 3/60 (2–14%) |
+| Rewrite + polyfill (on) | 53/60 (78–94%) | 56/60 (84–97%) | 4/60 (3–16%) |
+
+Polyfill outcomes: native 54, rescued 2, failed 4. Strict failures on the
+polyfill arm: no tool call 4, a valid call to `read` where `StructuredOutput`
+was expected 3. In observe mode the shim counted what a repair would have done:
+native 57, failed 3, rescued 0. No upstream errors this time.
+
+The two arms are equal within noise on this set. The rewrite-only stall rate
+fell from 12% to 5% between the two days with no change to scenarios or
+rewrite logic, which is upstream variation.
