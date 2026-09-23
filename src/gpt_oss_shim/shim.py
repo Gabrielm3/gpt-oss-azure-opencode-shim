@@ -54,6 +54,9 @@ SHIM_TRACE_DIR
     fixtures (default: empty, no traces).
 SHIM_TRACE_OUTCOMES
     Outcomes worth tracing (default: ``rescued,failed,empty_choices``).
+SHIM_TRACE_MAX_MB, SHIM_TRACE_RETENTION_DAYS
+    Size cap (default: ``100``) and days kept (default: ``14``) for the trace
+    directory, which also holds the per-request outcome log.
 OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_TRACES_EXPORTER
     Standard OpenTelemetry variables. Tracing is on when an endpoint is set,
     or with ``OTEL_TRACES_EXPORTER=console``. Needs the ``otel`` extra.
@@ -92,7 +95,12 @@ from .polyfill import (
     repair_stream,
 )
 from .telemetry import NO_SPAN, ChatSpan, Tracing, build_tracer, response_summary
-from .traces import DEFAULT_TRACE_OUTCOMES, TraceWriter
+from .traces import (
+    DEFAULT_MAX_BYTES,
+    DEFAULT_RETENTION_DAYS,
+    DEFAULT_TRACE_OUTCOMES,
+    TraceWriter,
+)
 
 __version__ = "0.3.0"
 
@@ -174,7 +182,22 @@ def _load_config() -> dict[str, Any]:
         "tool_polyfill": _env_polyfill_mode("SHIM_TOOL_POLYFILL"),
         "trace_dir": _env_path("SHIM_TRACE_DIR"),
         "trace_outcomes": _env_outcomes("SHIM_TRACE_OUTCOMES", DEFAULT_TRACE_OUTCOMES),
+        "trace_max_bytes": int(_env_number("SHIM_TRACE_MAX_MB", DEFAULT_MAX_BYTES / _MIB) * _MIB),
+        "trace_retention_days": _env_whole_number(
+            "SHIM_TRACE_RETENTION_DAYS", DEFAULT_RETENTION_DAYS
+        ),
     }
+
+
+_MIB = 1024 * 1024
+
+
+def _env_whole_number(name: str, default: int) -> int:
+    """Read a positive whole number from the environment, or fail with a clear error."""
+    value = _env_number(name, default)
+    if value != int(value):
+        raise RuntimeError(f"{name} must be a whole number, got {value!r}")
+    return int(value)
 
 
 def _env_path(name: str) -> Path | None:
@@ -409,7 +432,13 @@ def create_app(
     mode = PolyfillMode(config.get("tool_polyfill", PolyfillMode.ON))
     trace_dir = config.get("trace_dir")
     traces = (
-        TraceWriter(Path(trace_dir), config.get("trace_outcomes", DEFAULT_TRACE_OUTCOMES))
+        TraceWriter(
+            Path(trace_dir),
+            config.get("trace_outcomes", DEFAULT_TRACE_OUTCOMES),
+            max_bytes=config.get("trace_max_bytes", DEFAULT_MAX_BYTES),
+            retention_days=config.get("trace_retention_days", DEFAULT_RETENTION_DAYS),
+            on_drop=metrics.record_trace_dropped,
+        )
         if trace_dir
         else None
     )
@@ -480,6 +509,21 @@ def create_app(
                 model=payload.get("model"), forced=forced is not None, mode=mode
             )
 
+        def done(response: Response, outcome: Outcome, *args: Any, **kwargs: Any) -> Response:
+            """``finish`` plus one outcome-log line per chat request."""
+            response = finish(response, outcome, *args, **kwargs)
+            if is_chat and traces is not None:
+                traces.log_outcome(
+                    outcome=outcome,
+                    mode=mode,
+                    forced=forced_tool_choice(payload) is not None,
+                    stream=bool(payload.get("stream")),
+                    status=response.status_code,
+                    seconds=time.perf_counter() - started,
+                    model=payload.get("model"),
+                )
+            return response
+
         forward_headers = {
             k: v for k, v in request.headers.items() if k.lower() not in _STRIPPED_REQUEST_HEADERS
         }
@@ -498,9 +542,7 @@ def create_app(
             )
             upstream_response = await client.send(upstream_request, stream=True)
         except httpx.HTTPError as exc:
-            return finish(
-                upstream_error_response(exc), Outcome.UPSTREAM_ERROR, span=span, error=exc
-            )
+            return done(upstream_error_response(exc), Outcome.UPSTREAM_ERROR, span=span, error=exc)
 
         headers = forwardable_response_headers(upstream_response.headers)
         is_sse = "text/event-stream" in upstream_response.headers.get("content-type", "")
@@ -530,14 +572,12 @@ def create_app(
                 status_code=upstream_response.status_code,
                 headers=headers,
             )
-            return finish(response, default_outcome)
+            return done(response, default_outcome)
 
         try:
             content = await upstream_response.aread()
         except httpx.HTTPError as exc:
-            return finish(
-                upstream_error_response(exc), Outcome.UPSTREAM_ERROR, span=span, error=exc
-            )
+            return done(upstream_error_response(exc), Outcome.UPSTREAM_ERROR, span=span, error=exc)
         finally:
             await upstream_response.aclose()
 
@@ -555,15 +595,15 @@ def create_app(
             elapsed = time.perf_counter() - started
             logger.info("forced tool_choice outcome=%s seconds=%.2f", outcome.value, elapsed)
             if outcome is Outcome.EMPTY_CHOICES and not is_sse:
-                return finish(
+                return done(
                     empty_choices_response(headers), outcome, elapsed, span=span, summary=summary
                 )
             response = Response(content=content, status_code=200, headers=headers)
-            return finish(response, outcome, elapsed, span=span, summary=summary)
+            return done(response, outcome, elapsed, span=span, summary=summary)
 
         if is_chat and ok and not is_sse and _is_empty_completion(content):
             logger.error("upstream returned HTTP 200 with no choices")
-            return finish(
+            return done(
                 empty_choices_response(headers), Outcome.EMPTY_CHOICES, span=span, summary=summary
             )
 
@@ -573,7 +613,7 @@ def create_app(
             headers=headers,
             media_type="application/json",  # used only if upstream sent no content-type
         )
-        return finish(response, default_outcome, span=span, summary=summary)
+        return done(response, default_outcome, span=span, summary=summary)
 
     return app
 

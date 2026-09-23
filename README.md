@@ -259,7 +259,17 @@ SHIM_TRACE_DIR=~/.local/share/gpt-oss-azure-opencode-shim/traces
 
 A trace holds the candidate tools, the original `tool_choice` and the raw upstream answer. **It never holds `messages`**, so prompts, file contents and tool results stay out; the directory is created `0700` and the files `0600`. The recorded answer is still model output, so review a trace before committing it.
 
-Traces are appended to one file per day and **are never rotated or deleted**. Each record repeats the tool definitions, so an agent loop writes tens of MB per day (36 requests produced 478 KB in testing). Turn `SHIM_TRACE_DIR` on to collect material, then unset it and delete the directory.
+Traces go to one file per day and are bounded. Each record repeats the tool definitions (36 requests produced 478 KB in testing), so the shim deletes days older than `SHIM_TRACE_RETENTION_DAYS` (default 14) and deletes the oldest days first when the directory passes `SHIM_TRACE_MAX_MB` (default 100). When today's traces alone reach the cap, new traces are dropped until the next day and counted in `shim_traces_dropped_total`. Only files named `traces-YYYY-MM-DD.jsonl` or `outcomes-YYYY-MM-DD.jsonl` are ever deleted.
+
+### Production outcomes
+
+With `SHIM_TRACE_DIR` set, the shim also appends one small line per chat request to `outcomes-YYYY-MM-DD.jsonl`: outcome, polyfill mode, whether the client forced a tool call, HTTP status, latency and model name. It holds no content and is kept even when traces hit the cap. Prometheus counters reset on every restart, while this log gives rates over days:
+
+```bash
+python -m evals.report ~/.local/share/gpt-oss-azure-opencode-shim/traces --days 7
+```
+
+The report shows the share of forced requests and the native, rescued, failed and stalled rates with 95% Wilson intervals. It counts only forced requests that got HTTP 200; upstream errors are listed apart.
 
 Promote one into a regression fixture:
 
@@ -341,6 +351,8 @@ Do not expose the shim on a network interface. The `Host` check does not stop a 
 | `SHIM_TOOL_POLYFILL`    | no       | `on`        | `on`, `observe` or `off` (see Tool-call polyfill)    |
 | `SHIM_TRACE_DIR`        | no       | —           | Directory for traces of forced requests              |
 | `SHIM_TRACE_OUTCOMES`   | no       | `rescued,failed,empty_choices` | Outcomes worth tracing            |
+| `SHIM_TRACE_MAX_MB`     | no       | `100`       | Size cap for the trace directory                     |
+| `SHIM_TRACE_RETENTION_DAYS` | no   | `14`        | Days of traces and outcome lines to keep             |
 
 ---
 

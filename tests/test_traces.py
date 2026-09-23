@@ -59,7 +59,7 @@ def sse_handler(body: bytes):
 def _records(directory: Path) -> list[dict[str, Any]]:
     return [
         json.loads(line)
-        for f in sorted(directory.glob("*.jsonl"))
+        for f in sorted(directory.glob("traces-*.jsonl"))
         for line in f.read_text().splitlines()
     ]
 
@@ -80,7 +80,7 @@ def test_writer_creates_private_directory_and_file(tmp_path: Path) -> None:
     )
 
     assert stat.S_IMODE(directory.stat().st_mode) == 0o700
-    [trace_file] = directory.glob("*.jsonl")
+    [trace_file] = directory.glob("traces-*.jsonl")
     assert stat.S_IMODE(trace_file.stat().st_mode) == 0o600
     [record] = _records(directory)
     assert record["outcome"] == "failed"
@@ -183,3 +183,57 @@ async def test_trace_outcomes_filter_what_is_kept(
         await client.post("/v1/chat/completions", json=FORCED_REQUEST)
 
     assert len(_records(tmp_path)) == expected
+
+
+# --- outcome log --------------------------------------------------------------
+
+
+def _outcomes(directory: Path) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for f in sorted(directory.glob("outcomes-*.jsonl"))
+        for line in f.read_text().splitlines()
+    ]
+
+
+async def test_every_chat_request_lands_in_the_outcome_log(shim_client, tmp_path: Path) -> None:
+    plain = {"model": "gpt-oss-120b", "messages": [{"role": "user", "content": SECRET_PROMPT}]}
+    async with shim_client(sse_handler(JSON_TEXT_SSE), trace_dir=tmp_path) as client:
+        await client.post("/v1/chat/completions", json=FORCED_REQUEST)
+        await client.post("/v1/chat/completions", json={**plain, "stream": True})
+        await client.get("/v1/models")
+
+    forced, plain_record = _outcomes(tmp_path)
+    assert forced["outcome"] == "rescued"
+    assert forced["forced"] is True
+    assert forced["stream"] is True
+    assert forced["status"] == 200
+    assert forced["seconds"] >= 0
+    assert plain_record["outcome"] == "passthrough"
+    assert plain_record["forced"] is False
+    assert SECRET_PROMPT not in (tmp_path / next(tmp_path.glob("outcomes-*")).name).read_text()
+
+
+async def test_forced_request_is_marked_forced_even_with_the_polyfill_off(
+    shim_client, tmp_path: Path
+) -> None:
+    async with shim_client(
+        sse_handler(JSON_TEXT_SSE), trace_dir=tmp_path, tool_polyfill=PolyfillMode.OFF
+    ) as client:
+        await client.post("/v1/chat/completions", json=FORCED_REQUEST)
+
+    [record] = _outcomes(tmp_path)
+    assert record["outcome"] == "rewritten"
+    assert record["forced"] is True
+    assert record["mode"] == "off"
+
+
+async def test_dropped_traces_are_counted_in_metrics(shim_client, tmp_path: Path) -> None:
+    async with shim_client(
+        sse_handler(JSON_TEXT_SSE), trace_dir=tmp_path, trace_max_bytes=10
+    ) as client:
+        await client.post("/v1/chat/completions", json=FORCED_REQUEST)
+        metrics = (await client.get("/metrics")).text
+
+    assert _records(tmp_path) == []
+    assert "shim_traces_dropped_total 1.0" in metrics
