@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 
-from evals.tool_choice_eval import percentile, score
+from evals.tool_choice_eval import score
+from gpt_oss_shim.stats import percentile
 
 TOOL = {
     "type": "function",

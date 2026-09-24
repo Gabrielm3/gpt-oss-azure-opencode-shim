@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 
 def wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float, float]:
@@ -29,3 +30,12 @@ def format_rate(successes: int, total: int) -> str:
         f"{successes}/{total} ({100 * successes / total:.0f}%, "
         f"95% CI {100 * low:.0f}–{100 * high:.0f}%)"
     )
+
+
+def percentile(values: Sequence[float], pct: float) -> float | None:
+    """Nearest-rank percentile; ``None`` for an empty sequence."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = max(1, math.ceil(pct / 100 * len(ordered)))
+    return ordered[rank - 1]

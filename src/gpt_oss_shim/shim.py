@@ -68,14 +68,16 @@ SHIM_TOOL_POLYFILL
 
 from __future__ import annotations
 
+import argparse
 import ipaddress
 import json
 import logging
 import os
 import sys
 import time
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +104,7 @@ from .traces import (
     TraceWriter,
 )
 
-__version__ = "0.3.2"
+__version__ = version("gpt-oss-azure-opencode-shim")
 
 logger = logging.getLogger("gpt_oss_shim")
 
@@ -745,8 +747,26 @@ def configure_logging(level: str) -> None:
         logging.getLogger(client_logger).setLevel(client_level)
 
 
-def main() -> int:
+def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="gpt-oss-azure-opencode-shim",
+        description=(
+            "Local shim between OpenCode (or any OpenAI-compatible client) and "
+            "GPT-OSS on Azure AI Foundry."
+        ),
+        epilog=(
+            "Configuration comes from environment variables: UPSTREAM_URL and "
+            "AZURE_FOUNDRY_API_KEY are required; SHIM_PORT, SHIM_TOOL_POLYFILL, "
+            "SHIM_TRACE_DIR and the others are listed in the README."
+        ),
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point."""
+    _parse_args(argv)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

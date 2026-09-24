@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from evals.stats import format_rate, wilson_interval
+from gpt_oss_shim.stats import format_rate, wilson_interval
 
 
 def test_wilson_interval_matches_known_values() -> None:

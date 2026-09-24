@@ -267,7 +267,7 @@ Traces go to one file per day and are bounded. Each record repeats the tool defi
 With `SHIM_TRACE_DIR` set, the shim also appends one small line per chat request to `outcomes-YYYY-MM-DD.jsonl`: outcome, polyfill mode, whether the client forced a tool call, HTTP status, latency and model name. It holds no content and is kept even when traces hit the cap. Prometheus counters reset on every restart, while this log gives rates over days:
 
 ```bash
-python -m evals.report ~/.local/share/gpt-oss-azure-opencode-shim/traces --days 7
+gpt-oss-azure-opencode-shim-report ~/.local/share/gpt-oss-azure-opencode-shim/traces --days 7
 ```
 
 The report shows the share of forced requests and the native, rescued, failed and stalled rates with 95% Wilson intervals. It counts only forced requests that got HTTP 200; upstream errors are listed apart.

@@ -7,7 +7,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from evals.report import load_outcomes, main, summarize_outcomes
+from gpt_oss_shim.report import load_outcomes, main, summarize_outcomes
 
 
 def _record(outcome: str, *, forced: bool = True, status: int = 200, **extra: Any) -> dict:

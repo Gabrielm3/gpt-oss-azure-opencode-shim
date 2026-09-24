@@ -61,6 +61,7 @@ Source = "https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim"
 
 [project.scripts]
 gpt-oss-azure-opencode-shim = "gpt_oss_shim.shim:main"
+gpt-oss-azure-opencode-shim-report = "gpt_oss_shim.report:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
