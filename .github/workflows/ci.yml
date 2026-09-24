@@ -115,3 +115,29 @@ jobs:
             aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
             image --quiet --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL \
             --exit-code 1 shim:ci
+
+  infra:
+    name: Infra (tofu fmt and validate)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: 1.12.6
+          tofu_wrapper: false
+
+      # No backend and no credentials: this checks the code only. The live
+      # comparison runs in infra-drift.yml.
+      - name: Format
+        run: tofu fmt -check -recursive -diff
+
+      - name: Validate
+        run: |
+          tofu init -backend=false -lockfile=readonly -no-color
+          tofu validate -no-color

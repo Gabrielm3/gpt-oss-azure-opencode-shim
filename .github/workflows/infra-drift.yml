@@ -1,0 +1,147 @@
+name: Infra drift
+
+# Nightly: run `tofu plan` for infra/ against the live Azure account and fail
+# if the real setup no longer matches the code (see infra/README.md).
+#
+# The repo is public, so its Actions logs are public too. A plan prints the
+# subscription ID and the endpoint subdomain, so the full plan never reaches
+# the log: it goes to a private blob container, and only the one-line summary
+# ("Plan: ..." or "No changes.") is printed. Never triggered by pull requests:
+# the job holds Azure credentials, and forks must not reach them.
+
+on:
+  schedule:
+    - cron: "43 6 * * *"
+  push:
+    branches: [master]
+    paths: ["infra/**", ".github/workflows/infra-drift.yml"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: infra-drift
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Drift check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: infra-drift
+    permissions:
+      contents: read # checkout only
+      id-token: write # OIDC token for the Azure managed identity
+    outputs:
+      verdict: ${{ steps.plan.outputs.verdict }}
+      summary: ${{ steps.plan.outputs.summary }}
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_INPUT: "0"
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_resource_group_name: ${{ secrets.TF_RESOURCE_GROUP_NAME }}
+      TF_VAR_state_storage_account_name: ${{ secrets.TF_STATE_STORAGE_ACCOUNT }}
+      TF_VAR_account_name: ${{ secrets.TF_ACCOUNT_NAME }}
+      TF_VAR_custom_subdomain_name: ${{ secrets.TF_CUSTOM_SUBDOMAIN_NAME }}
+      TF_VAR_state_passphrase: ${{ secrets.TF_STATE_PASSPHRASE }}
+      # Auth for the provider and the backend: reuse the Azure CLI session.
+      ARM_USE_CLI: "true"
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The wrapper echoes stdout into the log, which would leak the plan.
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: 1.12.6
+          tofu_wrapper: false
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Init
+        run: |
+          mkdir -p "$RUNNER_TEMP/drift"
+          if ! tofu init -no-color > "$RUNNER_TEMP/drift/init.log" 2>&1; then
+            echo "::error::tofu init failed; the log is in the drift-reports container"
+            echo "INIT_FAILED=1" >> "$GITHUB_ENV"
+          fi
+
+      # -detailed-exitcode: 0 = no changes, 1 = error, 2 = drift.
+      # -lock=false: the identity can only read the state container.
+      - name: Plan
+        id: plan
+        if: env.INIT_FAILED != '1'
+        run: |
+          set +e
+          tofu plan -no-color -lock=false -detailed-exitcode > "$RUNNER_TEMP/drift/plan.txt" 2>&1
+          code=$?
+          set -e
+          summary="$(grep -E '^(Plan: |No changes\.)' "$RUNNER_TEMP/drift/plan.txt" | head -1 || true)"
+          case "$code" in
+            0) verdict=clean ;;
+            2) verdict=drift ;;
+            *) verdict=error; summary="tofu plan failed (exit $code)" ;;
+          esac
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
+          echo "### Infra drift: $verdict" >> "$GITHUB_STEP_SUMMARY"
+          echo "$summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "$verdict: $summary"
+
+      - name: Upload the report to private storage
+        if: always()
+        env:
+          STORAGE_ACCOUNT: ${{ secrets.TF_STATE_STORAGE_ACCOUNT }}
+        run: |
+          az storage blob upload-batch --auth-mode login --only-show-errors \
+            --account-name "$STORAGE_ACCOUNT" --destination drift-reports \
+            --destination-path "$GITHUB_RUN_ID" --source "$RUNNER_TEMP/drift" \
+            --output none
+          echo "Full report: drift-reports/$GITHUB_RUN_ID/ in the state storage account" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on drift or error
+        if: env.INIT_FAILED == '1' || steps.plan.outputs.verdict != 'clean'
+        env:
+          VERDICT: ${{ steps.plan.outputs.verdict || 'error' }}
+        run: |
+          echo "::error::infra drift check: $VERDICT"
+          exit 1
+
+  report-drift:
+    name: Open or update the drift issue
+    needs: plan
+    if: always() && needs.plan.outputs.verdict == 'drift'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write # open or comment on the drift issue
+    steps:
+      - name: Open or comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SUMMARY: ${{ needs.plan.outputs.summary }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="The live Azure setup no longer matches infra/: \`$SUMMARY\`"$'\n\n'
+          body+="Full plan: \`drift-reports/$RUN_ID/plan.txt\` in the state storage account."$'\n'
+          body+="Run: $RUN_URL"
+          gh label create infra-drift --color D93F0B \
+            --description "Nightly tofu plan found changes outside the code" --force
+          issue="$(gh issue list --label infra-drift --state open --limit 1 --json number --jq '.[0].number')"
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body "$body"
+          else
+            gh issue create --title "Infra drift: live Azure setup differs from infra/" \
+              --label infra-drift --body "$body"
+          fi
