@@ -3,7 +3,9 @@ name: Release
 # A version tag (v1.2.3) builds the distributions once, verifies them, waits
 # for approval on the `pypi` environment, then publishes them to PyPI with
 # trusted publishing (OIDC, no stored token) and PEP 740 attestations. The
-# same files are attached to the GitHub release.
+# same wheel then goes into a multi-arch container image on ghcr.io with an
+# SBOM, build provenance and a signed attestation, and the distributions are
+# attached to the GitHub release.
 #
 # Running the workflow by hand (workflow_dispatch) is a dry run: the same
 # build and checks, published to TestPyPI instead.
@@ -96,6 +98,75 @@ jobs:
           path: dist/
 
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  image:
+    name: Publish container image
+    # After PyPI, so the one approval on the pypi environment gates both.
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout the Dockerfile
+      packages: write # push to ghcr.io
+      id-token: write # sign the provenance attestation
+      attestations: write # store the attestation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - name: Image name
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      # Same checks as CI, on the wheel being released, before anything is pushed.
+      - name: Build and check (amd64)
+        run: |
+          docker build -t shim:release .
+          scripts/check-image.sh shim:release
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+            image --quiet --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL \
+            --exit-code 1 shim:release
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ steps.name.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.name.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
 
   github-release:
     name: Attach to GitHub release
