@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Workflow actions are pinned by commit SHA; this keeps the pins current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Hash-pinned build and publish tools (.github/release-requirements.txt).
+  - package-ecosystem: pip
+    directory: /.github
+    schedule:
+      interval: weekly
+    groups:
+      release-tools:
+        patterns: ["*"]

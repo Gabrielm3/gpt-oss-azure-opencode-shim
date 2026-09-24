@@ -419,6 +419,16 @@ python3 -m venv .venv
 ./.venv/bin/ruff format --check src tests evals
 ```
 
+### Releasing
+
+Releases go to PyPI through [trusted publishing](https://docs.pypi.org/trusted-publishers/): no API token is stored anywhere, and every file carries a PEP 740 attestation.
+
+1. Bump `version` in `pyproject.toml` (the only place it lives) and merge.
+2. Tag and push: `git tag -a v1.2.3 -m v1.2.3 && git push origin v1.2.3`.
+3. [`release.yml`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/.github/workflows/release.yml) builds once, checks the tag against the version, runs [`scripts/check-dist.sh`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/scripts/check-dist.sh) (metadata, wheel in a clean venv, full tests from the sdist), then waits for approval on the `pypi` environment before publishing and attaching the files to the GitHub release.
+
+Running the workflow by hand (`gh workflow run release.yml`) is a dry run to TestPyPI. Actions are pinned by commit SHA and build tools by hash, and Dependabot keeps both current.
+
 ---
 
 ## Contributing
