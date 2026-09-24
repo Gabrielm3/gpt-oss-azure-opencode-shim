@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gpt-oss-azure-opencode-shim"
-version = "0.4.0"
+version = "0.4.1"
 description = "Compatibility shim that fixes silent API failures when using Azure-hosted GPT-OSS models with OpenCode."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,6 +33,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Internet :: Proxy Servers",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Typing :: Typed",
