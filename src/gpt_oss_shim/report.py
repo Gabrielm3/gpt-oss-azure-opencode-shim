@@ -86,7 +86,7 @@ def summarize_outcomes(records: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _counts(counter: Counter, sep: str = " ") -> str:
+def _counts(counter: Counter[Any], sep: str = " ") -> str:
     return ", ".join(f"{k}{sep}{v}" for k, v in counter.most_common()) or "—"
 
 

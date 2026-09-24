@@ -245,7 +245,7 @@ def repair_stream(body: bytes, forced: ForcedToolChoice) -> tuple[bytes, Outcome
         elif event.get("usage"):
             usage_only.append({**event, "choices": []})
 
-    head = {k: parsed[0][k] for k in ("id", "created", "model") if k in parsed[0]}
+    head: dict[str, Any] = {k: parsed[0][k] for k in ("id", "created", "model") if k in parsed[0]}
     head["object"] = "chat.completion.chunk"
     call = {"index": 0, **_tool_call(name, value)}
     tool_event = {
