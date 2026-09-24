@@ -9,6 +9,15 @@ updates:
       actions:
         patterns: ["*"]
 
+  # Base images in the Dockerfile are pinned by digest.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      base-images:
+        patterns: ["*"]
+
   # Hash-pinned build and publish tools (.github/release-requirements.txt).
   - package-ecosystem: pip
     directory: /.github

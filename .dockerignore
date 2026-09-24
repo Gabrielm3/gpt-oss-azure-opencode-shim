@@ -1,0 +1,3 @@
+# Only the built wheel goes into the image.
+*
+!dist/*.whl

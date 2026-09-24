@@ -108,6 +108,24 @@ curl -s http://127.0.0.1:9526/healthz
 
 To upgrade, run `uv tool upgrade gpt-oss-azure-opencode-shim` (or `pipx upgrade gpt-oss-azure-opencode-shim`) and restart the service. From a clone, `./install.sh` does steps 1 to 3 with a local venv instead.
 
+**Or run the container image**
+
+```bash
+docker run -d --name gpt-oss-shim --restart unless-stopped \
+  -p 127.0.0.1:9526:9526 \
+  --env-file ~/.config/gpt-oss-azure-opencode-shim.env \
+  --read-only --cap-drop ALL --security-opt no-new-privileges \
+  ghcr.io/gabrielm3/gpt-oss-azure-opencode-shim:0.4
+```
+
+**Keep `127.0.0.1:` in `-p`.** Inside the container the shim listens on all interfaces (hence the startup warning), so the port mapping is what keeps it local. `-p 9526:9526` would let any machine on your network send requests that the shim signs with your Azure key. Don't set `SHIM_HOST` in the env file for Docker. When another container calls the shim by service name (say `http://shim:9526` in Compose), add that name to `SHIM_ALLOWED_HOSTS`.
+
+The image is multi-arch (amd64, arm64), distroless (no shell), runs as a non-root user and holds the same wheel as the PyPI release. Each release carries an SBOM, build provenance and a signed attestation:
+
+```bash
+gh attestation verify oci://ghcr.io/gabrielm3/gpt-oss-azure-opencode-shim:0.4 --owner Gabrielm3
+```
+
 **4. Point OpenCode at the shim**
 
 Add to `~/.config/opencode/opencode.json` (or merge with existing — see [`examples/opencode.json`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/examples/opencode.json)):
