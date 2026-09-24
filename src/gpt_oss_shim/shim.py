@@ -554,7 +554,7 @@ def create_app(
         if is_sse and (forced is None or observing):
             on_complete = None
             streamed: dict[str, Any] = {}
-            if observing:
+            if observing and forced is not None:
                 observed_forced, observed_payload = forced, payload
 
                 def on_complete(body: bytes) -> None:
@@ -569,12 +569,12 @@ def create_app(
                     summary=streamed.get("summary"),
                 )
 
-            response = StreamingResponse(
+            streaming = StreamingResponse(
                 relay_sse(upstream_response, on_complete=on_complete, on_close=on_close),
                 status_code=upstream_response.status_code,
                 headers=headers,
             )
-            return done(response, default_outcome)
+            return done(streaming, default_outcome)
 
         try:
             content = await upstream_response.aread()
@@ -585,7 +585,7 @@ def create_app(
 
         summary = response_summary(content, is_sse=is_sse) if is_chat else None
 
-        if observing:
+        if observing and forced is not None:
             span.set_observed(observe(content, forced, payload, is_sse=False))
         elif forced is not None and ok:
             # The whole answer is needed before it can be checked against the

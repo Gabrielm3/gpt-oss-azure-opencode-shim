@@ -1,7 +1,7 @@
 """OpenTelemetry tracing for forwarded chat requests.
 
 Tracing is optional: without a tracer every call here is a no-op, and the
-shim runs without OpenTelemetry installed (``pip install '.[otel]'`` adds it).
+shim runs without OpenTelemetry installed (the ``otel`` extra adds it).
 
 Spans follow the GenAI semantic conventions (``gen_ai.*``) and add what is
 specific to this shim (``shim.outcome``, ``shim.polyfill.mode``). The
@@ -24,7 +24,7 @@ logger = logging.getLogger("gpt_oss_shim")
 try:  # OpenTelemetry is an optional dependency.
     from opentelemetry.trace import SpanKind, Status, StatusCode
 except ImportError:  # pragma: no cover - exercised only without the otel extra
-    SpanKind = Status = StatusCode = None  # type: ignore[assignment]
+    SpanKind = Status = StatusCode = None  # type: ignore[assignment,misc]
 
 PROVIDER_NAME = "azure.ai.openai"
 
@@ -161,7 +161,9 @@ def build_tracer(version: str) -> Any | None:
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
     except ImportError:
-        logger.warning("tracing is configured but not installed; pip install '.[otel]'")
+        logger.warning(
+            "tracing is configured but not installed; pip install 'gpt-oss-azure-opencode-shim[otel]'"
+        )
         return None
 
     if exporter_name == "console":
@@ -170,7 +172,9 @@ def build_tracer(version: str) -> Any | None:
         try:
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
         except ImportError:
-            logger.warning("OTLP tracing is configured but not installed; pip install '.[otel]'")
+            logger.warning(
+                "OTLP tracing is configured but not installed; pip install 'gpt-oss-azure-opencode-shim[otel]'"
+            )
             return None
         exporter = OTLPSpanExporter()
 

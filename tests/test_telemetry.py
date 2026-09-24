@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -15,7 +16,7 @@ from opentelemetry.trace import StatusCode
 
 from gpt_oss_shim.polyfill import PolyfillMode
 from gpt_oss_shim.shim import create_app
-from gpt_oss_shim.telemetry import response_summary
+from gpt_oss_shim.telemetry import build_tracer, response_summary
 from tests.conftest import FAKE_CONFIG, SHIM_BASE_URL
 
 STRUCTURED = {
@@ -222,3 +223,48 @@ async def test_requests_that_are_not_chat_completions_are_not_traced(spans) -> N
         await client.get("/v1/models")
 
     assert exporter.get_finished_spans() == ()
+
+
+# --- build_tracer -------------------------------------------------------------
+
+_OTEL_VARS = (
+    "OTEL_TRACES_EXPORTER",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+)
+
+
+@pytest.fixture
+def otel_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+    for name in _OTEL_VARS:
+        monkeypatch.delenv(name, raising=False)
+    shutdowns: list[object] = []
+    monkeypatch.setattr("atexit.register", shutdowns.append)
+    return monkeypatch
+
+
+def test_tracing_is_off_without_configuration(otel_env: pytest.MonkeyPatch) -> None:
+    assert build_tracer("1.0") is None
+
+
+def test_exporter_none_wins_over_an_endpoint(otel_env: pytest.MonkeyPatch) -> None:
+    otel_env.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
+    otel_env.setenv("OTEL_TRACES_EXPORTER", "none")
+
+    assert build_tracer("1.0") is None
+
+
+def test_console_exporter_builds_a_tracer(otel_env: pytest.MonkeyPatch) -> None:
+    otel_env.setenv("OTEL_TRACES_EXPORTER", "console")
+
+    assert build_tracer("1.0") is not None
+
+
+def test_missing_otlp_exporter_warns_and_disables_tracing(
+    otel_env: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    otel_env.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
+    otel_env.setitem(sys.modules, "opentelemetry.exporter.otlp.proto.http.trace_exporter", None)
+
+    assert build_tracer("1.0") is None
+    assert "gpt-oss-azure-opencode-shim[otel]" in caplog.text
