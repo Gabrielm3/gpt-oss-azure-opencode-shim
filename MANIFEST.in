@@ -1,0 +1,7 @@
+# The sdist carries everything needed to run the test suite and the evals.
+include .env.example install.sh
+graft docs
+graft evals
+graft examples
+graft tests
+global-exclude __pycache__ *.py[cod]
