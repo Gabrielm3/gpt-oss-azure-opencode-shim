@@ -30,6 +30,35 @@ did not regress.
   `~/.config/azure-shim/tofu-state-passphrase`, in CI as a secret). If you
   lose it, you lose the state. Keep a copy in a password manager.
 
+## Bootstrap (one time, already done)
+
+These resources hold the state or support CI, so they live outside this
+configuration. They were created with the Azure CLI:
+
+```bash
+az provider register -n Microsoft.Storage --wait
+
+# State storage: Entra ID only, versioned, soft delete
+az storage account create -g "$RG" -n "$SA" -l northcentralus --sku Standard_LRS \
+  --min-tls-version TLS1_2 --allow-blob-public-access false \
+  --allow-shared-key-access false --https-only true
+az storage account blob-service-properties update -g "$RG" -n "$SA" \
+  --enable-versioning true --enable-delete-retention true --delete-retention-days 30
+az storage container create --account-name "$SA" -n tfstate --auth-mode login
+az storage container create --account-name "$SA" -n drift-reports --auth-mode login
+# plus a lifecycle rule that deletes drift-reports/ blobs after 90 days
+
+# CI identity, trusted only for the infra-drift environment
+az identity create -g "$RG" -n id-azure-shim-drift -l northcentralus
+az identity federated-credential create -g "$RG" --identity-name id-azure-shim-drift \
+  -n github-infra-drift --issuer https://token.actions.githubusercontent.com \
+  --subject "repo:Gabrielm3/gpt-oss-azure-opencode-shim:environment:infra-drift" \
+  --audiences api://AzureADTokenExchange
+```
+
+The role assignments, the master-only `infra-drift` environment and its
+secrets were then set up by a one-time script. The steps are described below.
+
 ## Local use
 
 The repo is public, so no identifiers are committed. Create
@@ -66,9 +95,18 @@ fails and opens (or comments on) an `infra-drift` issue.
   through GitHub OIDC (a federated credential for the `infra-drift`
   environment). There is no client secret, and no Entra app registration is
   needed.
-- **Least privilege:** `Reader` on the account, `Storage Blob Data Reader` on
-  `tfstate` (the plan runs with `-lock=false`), and `Storage Blob Data
-  Contributor` on `drift-reports` only. The identity cannot change Azure.
+- **Least privilege:** the custom role `Azure Shim Drift Reader` on the
+  account, `Storage Blob Data Reader` on `tfstate` (the plan runs with
+  `-lock=false`), and `Storage Blob Data Contributor` on `drift-reports` only.
+  The identity cannot change Azure.
+- **Accepted tradeoff: CI can read the API keys.** Plain `Reader` is not
+  enough. The azurerm provider calls `listKeys` on every refresh of an account
+  with local auth enabled, and the plan fails if that call is denied. So the
+  custom role is Reader plus `listKeys`, scoped to this one account. The
+  identity works only from `master` through the `infra-drift` environment, and
+  the keys appear as `(sensitive value)` in the plan. The way to remove this
+  tradeoff is to switch the shim to Entra ID auth (`local_auth_enabled =
+  false`).
 - **No public logs:** Actions logs on a public repo are public, and a plan
   prints the subscription ID and the endpoint. The full plan goes to the
   private `drift-reports/<run id>/` container, which deletes reports after 90

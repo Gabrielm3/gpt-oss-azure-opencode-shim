@@ -9,7 +9,7 @@ terraform {
   }
 
   # Remote state in Azure Blob Storage, Entra ID auth only (the storage
-  # account has shared-key access disabled). The bootstrap is in infra/README.md.
+  # account has shared-key access disabled). Bootstrap: infra/README.md.
   backend "azurerm" {
     resource_group_name  = var.resource_group_name
     storage_account_name = var.state_storage_account_name
