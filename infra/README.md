@@ -52,9 +52,13 @@ az storage container create --account-name "$SA" -n drift-reports --auth-mode lo
 az identity create -g "$RG" -n id-azure-shim-drift -l northcentralus
 az identity federated-credential create -g "$RG" --identity-name id-azure-shim-drift \
   -n github-infra-drift --issuer https://token.actions.githubusercontent.com \
-  --subject "repo:Gabrielm3/gpt-oss-azure-opencode-shim:environment:infra-drift" \
+  --subject "repo:Gabrielm3@48194646/gpt-oss-azure-opencode-shim@1380006725:environment:infra-drift" \
   --audiences api://AzureADTokenExchange
 ```
+
+This repo's OIDC tokens use GitHub's immutable subject format
+(`owner@<owner id>/repo@<repo id>`). A subject in the old `owner/repo` form
+fails with `AADSTS700213`.
 
 The role assignments, the master-only `infra-drift` environment and its
 secrets were then set up by a one-time script. The steps are described below.
