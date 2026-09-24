@@ -136,7 +136,7 @@ def run_once(
 
 
 # Reasons for which the client got no usable tool call at all: an agent loop stalls.
-_STALLED = frozenset({"no_tool_call", "unparseable"})
+STALLED_REASONS = frozenset({"no_tool_call", "unparseable"})
 
 
 def summarize(records: list[dict[str, Any]]) -> str:
@@ -159,7 +159,7 @@ def summarize(records: list[dict[str, Any]]) -> str:
         # Records saved before progress existed: a strict success is progress too.
         moved = sum(r.get("progress", r["ok"]) for r in rows)
         answered = [r for r in rows if not r["reason"].startswith(("http_", "transport:"))]
-        stalled = sum(r["reason"] in _STALLED for r in answered)
+        stalled = sum(r["reason"] in STALLED_REASONS for r in answered)
         outcomes = Counter(r["outcome"] for r in rows if r["outcome"])
         reasons = Counter(r["reason"] for r in rows if not r["ok"])
         latencies = [r["seconds"] for r in rows]

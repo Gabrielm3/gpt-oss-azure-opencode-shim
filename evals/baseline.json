@@ -1,0 +1,11 @@
+{
+  "source": "2026-09-23 rerun in docs/PROBLEM.md (Evaluation): shim v0.3.1, SHIM_TOOL_POLYFILL=on, gpt-oss-120b, 15 scenarios x 4. Counts typed from that table; the raw results file was not kept. Replace with pooled nightly runs through a PR.",
+  "date": "2026-09-23",
+  "shim_version": "0.3.1",
+  "model": "gpt-oss-120b",
+  "metrics": {
+    "stalled": {"k": 4, "n": 60},
+    "success": {"k": 53, "n": 60},
+    "progress": {"k": 56, "n": 60}
+  }
+}

@@ -39,3 +39,20 @@ def percentile(values: Sequence[float], pct: float) -> float | None:
     ordered = sorted(values)
     rank = max(1, math.ceil(pct / 100 * len(ordered)))
     return ordered[rank - 1]
+
+
+def difference_interval(k1: int, n1: int, k2: int, n2: int, z: float = 1.96) -> tuple[float, float]:
+    """Return the 95% interval for ``k1/n1 - k2/n2`` (Newcombe's hybrid score method).
+
+    It combines the two Wilson intervals, so it inherits their behavior at 0 and
+    n and accounts for the noise in both samples. When the interval excludes
+    zero, the two rates differ beyond sampling noise.
+    """
+    p1, p2 = k1 / n1, k2 / n2
+    low1, high1 = wilson_interval(k1, n1, z)
+    low2, high2 = wilson_interval(k2, n2, z)
+    difference = p1 - p2
+    return (
+        difference - math.sqrt((p1 - low1) ** 2 + (high2 - p2) ** 2),
+        difference + math.sqrt((high1 - p1) ** 2 + (p2 - low2) ** 2),
+    )

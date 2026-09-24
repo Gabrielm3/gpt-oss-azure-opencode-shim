@@ -1,0 +1,153 @@
+name: Live eval (drift canary)
+
+# Nightly: run the forced-tool eval through the shim on master against the real
+# Azure deployment and compare it with evals/baseline.json (see docs/EVALS.md).
+# The code does not change between nights, so drift here means the upstream
+# model changed. Never triggered by pull requests: the job holds Azure
+# credentials, and forks must not reach them.
+#
+# GitHub disables scheduled workflows after 60 days without repository
+# activity; re-enable it from the Actions tab when that happens.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      repeat:
+        description: "Runs per scenario, 2-8 (15 scenarios each; the gate needs 30 answers; cost grows linearly)"
+        default: "4"
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: live-eval
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    name: Live eval
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: live-eval
+    permissions:
+      contents: read # checkout only
+    outputs:
+      verdict: ${{ steps.gate.outputs.verdict }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: python -m pip install -e .
+
+      - name: Check inputs and credentials
+        env:
+          REPEAT: ${{ inputs.repeat || '4' }}
+          UPSTREAM_URL: ${{ secrets.UPSTREAM_URL }}
+          AZURE_FOUNDRY_API_KEY: ${{ secrets.AZURE_FOUNDRY_API_KEY }}
+        run: |
+          if ! [[ "$REPEAT" =~ ^[2-8]$ ]]; then
+            echo "::error::repeat must be a whole number from 2 to 8"
+            exit 1
+          fi
+          if [ -z "$UPSTREAM_URL" ] || [ -z "$AZURE_FOUNDRY_API_KEY" ]; then
+            echo "::error::set UPSTREAM_URL and AZURE_FOUNDRY_API_KEY on the live-eval environment"
+            exit 1
+          fi
+          echo "REPEAT=$REPEAT" >> "$GITHUB_ENV"
+          echo "RESULTS_DIR=$RUNNER_TEMP/live-eval" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/live-eval"
+
+      - name: Start the shim
+        env:
+          UPSTREAM_URL: ${{ secrets.UPSTREAM_URL }}
+          AZURE_FOUNDRY_API_KEY: ${{ secrets.AZURE_FOUNDRY_API_KEY }}
+          SHIM_TOOL_POLYFILL: "on"
+          SHIM_TRACE_DIR: ${{ runner.temp }}/live-eval/traces
+        run: |
+          nohup gpt-oss-azure-opencode-shim > "$RUNNER_TEMP/shim.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9526/healthz; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::the shim did not answer /healthz within 30 seconds"
+          exit 1
+
+      - name: Run the eval
+        run: |
+          python -m evals.tool_choice_eval \
+            --target shim=http://127.0.0.1:9526/v1/chat/completions \
+            --repeat "$REPEAT" --out "$RESULTS_DIR/results.json"
+
+      - name: Gate against the baseline
+        id: gate
+        run: |
+          set +e
+          python -m evals.gate "$RESULTS_DIR/results.json" --baseline evals/baseline.json \
+            --target shim --summary "$RESULTS_DIR/summary.md"
+          code=$?
+          set -e
+          cat "$RESULTS_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          case "$code" in
+            0) verdict=pass ;;
+            1) verdict=drift ;;
+            3) verdict=inconclusive ;;
+            *) echo "::error::the gate failed with exit code $code"; exit "$code" ;;
+          esac
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          if [ "$verdict" != pass ]; then
+            echo "::error::live eval verdict: $verdict"
+            exit 1
+          fi
+
+      # Results, the gate report and the shim's content-free outcome log. The
+      # shim log stays on the runner: it is not needed and is not scrubbed.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: live-eval-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/live-eval/results.json
+            ${{ runner.temp }}/live-eval/summary.md
+            ${{ runner.temp }}/live-eval/traces/outcomes-*.jsonl
+          if-no-files-found: warn
+          retention-days: 90
+
+  report-drift:
+    name: Open or update the drift issue
+    needs: eval
+    if: always() && needs.eval.outputs.verdict == 'drift'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read # download this run's artifact
+      issues: write # open or comment on the drift issue
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: live-eval-${{ github.run_id }}
+          path: report
+
+      - name: Open or comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="$(cat report/summary.md)"$'\n\n'"Run: $RUN_URL"
+          gh label create eval-drift --color B60205 \
+            --description "Nightly live eval detected upstream model drift" --force
+          issue="$(gh issue list --label eval-drift --state open --limit 1 --json number --jq '.[0].number')"
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body "$body"
+          else
+            gh issue create --title "Upstream drift: stalled turns above baseline" \
+              --label eval-drift --body "$body"
+          fi

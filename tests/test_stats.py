@@ -23,3 +23,21 @@ def test_wilson_interval_stays_inside_zero_and_one() -> None:
 def test_format_rate_shows_count_share_and_interval() -> None:
     assert format_rate(49, 60) == "49/60 (82%, 95% CI 70–89%)"
     assert format_rate(0, 0) == "—"
+
+
+def test_difference_interval_matches_newcombe_worked_example() -> None:
+    from gpt_oss_shim.stats import difference_interval
+
+    # Newcombe (1998), method 10: 56/70 vs 48/80 -> 95% CI 0.0524 to 0.3339.
+    low, high = difference_interval(56, 70, 48, 80)
+
+    assert low == pytest.approx(0.0524, abs=1e-3)
+    assert high == pytest.approx(0.3339, abs=1e-3)
+
+
+def test_difference_interval_contains_zero_for_equal_rates() -> None:
+    from gpt_oss_shim.stats import difference_interval
+
+    low, high = difference_interval(4, 60, 4, 60)
+
+    assert low < 0 < high
