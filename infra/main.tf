@@ -45,8 +45,9 @@ resource "azurerm_cognitive_deployment" "gpt_oss" {
     capacity = var.gpt_oss_capacity
   }
 
-  rai_policy_name        = "Microsoft.DefaultV2"
-  version_upgrade_option = "OnceNewDefaultVersionAvailable"
+  rai_policy_name = "Microsoft.DefaultV2"
+  # Model upgrades go through a PR (and the live eval), never silently.
+  version_upgrade_option = "NoAutoUpgrade"
 
   lifecycle {
     prevent_destroy = true
