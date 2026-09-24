@@ -2,6 +2,7 @@
 
 > A small local HTTP shim for **Azure-hosted GPT-OSS models**. It rewrites the forced `tool_choice` values that Azure AI Foundry rejects, turns answers that miss the required tool call back into that tool call, reports what it did on every request, and keeps the API key out of the client configuration.
 
+[![PyPI](https://img.shields.io/pypi/v/gpt-oss-azure-opencode-shim.svg)](https://pypi.org/project/gpt-oss-azure-opencode-shim/)
 [![CI](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/actions/workflows/ci.yml/badge.svg)](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
@@ -30,7 +31,7 @@ Measured against the real deployment (see [Evaluation](#evaluation)):
 
 On the 15-scenario synthetic set the polyfill cut stalled turns from 12% to 4% on 2026-09-22, but a rerun on 2026-09-23 found both arms equal within noise (5% and 7%). The structured-output gain is the one that holds.
 
-Every claim in this README is backed by real requests recorded in [`docs/PROBLEM.md`](docs/PROBLEM.md).
+Every claim in this README is backed by real requests recorded in [`docs/PROBLEM.md`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/docs/PROBLEM.md).
 
 ---
 
@@ -55,7 +56,7 @@ Use the shim when a client **forces** a tool call against this deployment:
 
 You do not need it for plain `opencode run`. OpenCode 1.18.31 sends `tool_choice: "auto"` for normal agent turns, and those work against Azure directly with the `@ai-sdk/openai-compatible` provider.
 
-**Limit:** `"auto"` lets the model choose. The polyfill only converts answers that already contain schema-valid JSON. A prose answer ("The files are README.md and …") stays as it is, and the request is counted as `failed`. See [`docs/PROBLEM.md`](docs/PROBLEM.md#6-answers-that-miss-the-tool-call).
+**Limit:** `"auto"` lets the model choose. The polyfill only converts answers that already contain schema-valid JSON. A prose answer ("The files are README.md and …") stays as it is, and the request is counted as `failed`. See [`docs/PROBLEM.md`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/docs/PROBLEM.md#6-answers-that-miss-the-tool-call).
 
 ---
 
@@ -64,29 +65,52 @@ You do not need it for plain `opencode run`. OpenCode 1.18.31 sends `tool_choice
 **1. Install**
 
 ```bash
-git clone https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim.git
-cd gpt-oss-azure-opencode-shim
-./install.sh
+uv tool install gpt-oss-azure-opencode-shim
+# or: pipx install gpt-oss-azure-opencode-shim
 ```
+
+Both put the `gpt-oss-azure-opencode-shim` and `gpt-oss-azure-opencode-shim-report` commands in `~/.local/bin`. Add the `[otel]` extra for OpenTelemetry (`uv tool install 'gpt-oss-azure-opencode-shim[otel]'`). To try it without installing, run `uvx gpt-oss-azure-opencode-shim --help`.
 
 **2. Configure**
 
-Edit `~/.config/gpt-oss-azure-opencode-shim.env`:
+The key goes in a file only you can read:
 
 ```bash
+install -m 600 /dev/null ~/.config/gpt-oss-azure-opencode-shim.env
+cat >> ~/.config/gpt-oss-azure-opencode-shim.env <<'EOF'
 UPSTREAM_URL=https://YOUR_RESOURCE.services.ai.azure.com/openai
 AZURE_FOUNDRY_API_KEY=your-key-here
+EOF
 ```
 
-**3. Run**
+**3. Run as a systemd user service**
 
 ```bash
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/gpt-oss-azure-opencode-shim.service <<'EOF'
+[Unit]
+Description=gpt-oss-azure-opencode-shim
+After=network.target
+
+[Service]
+EnvironmentFile=%h/.config/gpt-oss-azure-opencode-shim.env
+ExecStart=%h/.local/bin/gpt-oss-azure-opencode-shim
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+systemctl --user daemon-reload
 systemctl --user enable --now gpt-oss-azure-opencode-shim
+curl -s http://127.0.0.1:9526/healthz
 ```
+
+To upgrade, run `uv tool upgrade gpt-oss-azure-opencode-shim` (or `pipx upgrade gpt-oss-azure-opencode-shim`) and restart the service. From a clone, `./install.sh` does steps 1 to 3 with a local venv instead.
 
 **4. Point OpenCode at the shim**
 
-Add to `~/.config/opencode/opencode.json` (or merge with existing — see [`examples/opencode.json`](examples/opencode.json)):
+Add to `~/.config/opencode/opencode.json` (or merge with existing — see [`examples/opencode.json`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/examples/opencode.json)):
 
 ```json
 {
@@ -116,7 +140,7 @@ The `apiKey` value is a placeholder. The shim replaces it with the real key.
 
 ## Verify the Fix
 
-[`examples/curl-tests.sh`](examples/curl-tests.sh) reproduces each Azure response and checks the shim against the real deployment:
+[`examples/curl-tests.sh`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/examples/curl-tests.sh) reproduces each Azure response and checks the shim against the real deployment:
 
 ```bash
 export UPSTREAM_URL=https://YOUR_RESOURCE.services.ai.azure.com/openai
@@ -220,7 +244,7 @@ shim_forced_request_duration_seconds_count{outcome="rescued"} 13.0
 
 ### 4. Credentials
 
-The client sends a placeholder key. The shim sends the real key as both `api-key` and `Authorization: Bearer` (Azure accepts either). The key lives only in the shim's environment file, which `install.sh` creates with mode `600`.
+The client sends a placeholder key. The shim sends the real key as both `api-key` and `Authorization: Bearer` (Azure accepts either). The key lives only in the shim's environment file, which the Quick Start and `install.sh` create with mode `600`.
 
 ### 5. Header hygiene
 
@@ -242,7 +266,7 @@ The shim sets its own `Content-Type` and drops the client's copy, plus `Authoriz
 ### OpenTelemetry (optional)
 
 ```bash
-pip install '.[otel]'
+uv tool install 'gpt-oss-azure-opencode-shim[otel]'   # or: pipx install '...[otel]'
 OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 systemctl --user restart gpt-oss-azure-opencode-shim
 ```
 
@@ -267,7 +291,7 @@ Traces go to one file per day and are bounded. Each record repeats the tool defi
 With `SHIM_TRACE_DIR` set, the shim also appends one small line per chat request to `outcomes-YYYY-MM-DD.jsonl`: outcome, polyfill mode, whether the client forced a tool call, HTTP status, latency and model name. It holds no content and is kept even when traces hit the cap. Prometheus counters reset on every restart, while this log gives rates over days:
 
 ```bash
-python -m evals.report ~/.local/share/gpt-oss-azure-opencode-shim/traces --days 7
+gpt-oss-azure-opencode-shim-report ~/.local/share/gpt-oss-azure-opencode-shim/traces --days 7
 ```
 
 The report shows the share of forced requests and the native, rescued, failed and stalled rates with 95% Wilson intervals. It counts only forced requests that got HTTP 200; upstream errors are listed apart.
@@ -289,7 +313,7 @@ The fixtures in `tests/fixtures/polyfill/` were recorded this way from `gpt-oss-
 
 ## Evaluation
 
-[`evals/tool_choice_eval.py`](evals/tool_choice_eval.py) sends 15 forced-tool scenarios ([`evals/scenarios.py`](evals/scenarios.py)) to each target: final-answer steps after a tool result, single-turn extraction into a schema, forced functions, and `"required"` with action tools (7 of them streamed). A run succeeds when the first tool call names the expected tool and its arguments validate against that tool's schema. A turn is stalled when the answer has no tool call at all.
+[`evals/tool_choice_eval.py`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/evals/tool_choice_eval.py) sends 15 forced-tool scenarios ([`evals/scenarios.py`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/evals/scenarios.py)) to each target: final-answer steps after a tool result, single-turn extraction into a schema, forced functions, and `"required"` with action tools (7 of them streamed). A run succeeds when the first tool call names the expected tool and its arguments validate against that tool's schema. A turn is stalled when the answer has no tool call at all.
 
 Results on 2026-09-22, `gpt-oss-120b`, 15 scenarios × 4 repetitions per target:
 
@@ -395,6 +419,16 @@ python3 -m venv .venv
 ./.venv/bin/ruff format --check src tests evals
 ```
 
+### Releasing
+
+Releases go to PyPI through [trusted publishing](https://docs.pypi.org/trusted-publishers/): no API token is stored anywhere, and every file carries a PEP 740 attestation.
+
+1. Bump `version` in `pyproject.toml` (the only place it lives) and merge.
+2. Tag and push: `git tag -a v1.2.3 -m v1.2.3 && git push origin v1.2.3`.
+3. [`release.yml`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/.github/workflows/release.yml) builds once, checks the tag against the version, runs [`scripts/check-dist.sh`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/scripts/check-dist.sh) (metadata, wheel in a clean venv, full tests from the sdist), then waits for approval on the `pypi` environment before publishing and attaching the files to the GitHub release.
+
+Running the workflow by hand (`gh workflow run release.yml`) is a dry run to TestPyPI. Actions are pinned by commit SHA and build tools by hash, and Dependabot keeps both current.
+
 ---
 
 ## Contributing
@@ -405,4 +439,4 @@ Issues and PRs are welcome. Run `pytest`, `ruff check src tests evals`, and `ruf
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — see [`LICENSE`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/LICENSE).

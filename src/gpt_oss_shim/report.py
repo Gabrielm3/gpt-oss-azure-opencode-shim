@@ -8,7 +8,7 @@ numbers survive restarts and do not need a Prometheus server.
 
 Usage::
 
-    python -m evals.report ~/.local/share/gpt-oss-azure-opencode-shim/traces --days 7
+    gpt-oss-azure-opencode-shim-report ~/.local/share/gpt-oss-azure-opencode-shim/traces --days 7
 
 Polyfill rates count forced requests answered with HTTP 200. Forced requests
 with another status are upstream errors and are listed apart.
@@ -26,8 +26,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from evals.stats import format_rate
-from evals.tool_choice_eval import percentile
+from .stats import format_rate, percentile
 
 _OUTCOME_FILE = re.compile(r"^outcomes-(\d{4}-\d{2}-\d{2})\.jsonl$")
 _FORCED_OUTCOMES = ("native", "rescued", "failed", "empty_choices", "rewritten")
@@ -91,10 +90,24 @@ def _counts(counter: Counter, sep: str = " ") -> str:
     return ", ".join(f"{k}{sep}{v}" for k, v in counter.most_common()) or "—"
 
 
+def _positive_int(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {raw!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(
+        prog="gpt-oss-azure-opencode-shim-report", description=__doc__.split("\n\n")[0]
+    )
     parser.add_argument("directory", type=Path, help="the shim's SHIM_TRACE_DIR")
-    parser.add_argument("--days", type=int, default=7, help="days to include, today counts")
+    parser.add_argument(
+        "--days", type=_positive_int, default=7, help="days to include, today counts"
+    )
     args = parser.parse_args(argv)
 
     today = datetime.now(timezone.utc).date()

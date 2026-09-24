@@ -10,7 +10,7 @@ can still contain user data, so traces live in a private local directory
 
 Next to the traces, an outcome log gets one small line per chat request
 (outcome, status, latency, no content), so production rates can be measured
-over days with ``python -m evals.report`` even across restarts.
+over days with ``gpt-oss-azure-opencode-shim-report`` even across restarts.
 
 Both kinds of file are daily and bounded: files older than
 ``retention_days`` are deleted, and the oldest days of traces go first when

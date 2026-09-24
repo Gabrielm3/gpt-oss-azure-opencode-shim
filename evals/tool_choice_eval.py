@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import sys
 import time
@@ -36,7 +35,7 @@ import httpx
 from jsonschema.validators import validator_for
 
 from evals.scenarios import SCENARIOS
-from evals.stats import format_rate
+from gpt_oss_shim.stats import format_rate, percentile
 
 OUTCOME_HEADER = "x-shim-outcome"
 
@@ -95,15 +94,6 @@ def progress(scenario: dict[str, Any], status: int, body: bytes, *, stream: bool
     """Return ``True`` when the first tool call is any offered tool with valid arguments."""
     ok, _ = score({**scenario, "expect_tool": None}, status, body, stream=stream)
     return ok
-
-
-def percentile(values: Sequence[float], pct: float) -> float | None:
-    """Nearest-rank percentile; ``None`` for an empty sequence."""
-    if not values:
-        return None
-    ordered = sorted(values)
-    rank = max(1, math.ceil(pct / 100 * len(ordered)))
-    return ordered[rank - 1]
 
 
 def run_once(
