@@ -59,7 +59,7 @@ az storage container create --account-name "$SA" -n drift-reports --auth-mode lo
 az identity create -g "$RG" -n id-azure-shim-drift -l northcentralus
 az identity federated-credential create -g "$RG" --identity-name id-azure-shim-drift \
   -n github-infra-drift --issuer https://token.actions.githubusercontent.com \
-  --subject "repo:Gabrielm3@48194646/gpt-oss-azure-opencode-shim@1380006725:environment:infra-drift" \
+  --subject "repo:<owner>@<owner id>/<repo>@<repo id>:environment:infra-drift" \
   --audiences api://AzureADTokenExchange
 ```
 
