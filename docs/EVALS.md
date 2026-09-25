@@ -76,6 +76,25 @@ nightly results into the baseline. The current baseline is typed from the
 2026-09-23 run in [`PROBLEM.md`](PROBLEM.md) and says so in its `source` field.
 The baseline changes only through a reviewed PR, like any golden file.
 
+### Argument values: correct, not just valid
+
+A schema-valid call can still carry the wrong values. 9 of the 15 scenarios
+have golden arguments (`expect_args`, matched by `evals/golden.py`) for the
+fields with exactly one right answer: an extracted age, a file list, a pinned
+enum. Triage severity, ticket priority and free-text fields are not scored,
+because a reasonable model can fill them differently.
+
+The report scores the strict successes on those scenarios, overall and by
+`x-shim-outcome`. The `rescued` column is the polyfill's precision: when the
+shim turns text into a tool call, how often the values are right. A rescue
+that invents values would inflate strict success, and this column exposes it.
+The nightly summary shows the table, but it does not gate. The gate stays on
+one metric, and rescues are too rare for a tight interval in one night.
+
+First run on 2026-09-25 (shim, 15 scenarios × 2): 16/16 arguments correct
+(95% CI 81–100%), all native. The run had no scored rescues, so polyfill
+precision needs pooled nights before it says anything.
+
 ### When the gate fires
 
 - **Drift:** the run fails and an `eval-drift` issue is opened, or commented

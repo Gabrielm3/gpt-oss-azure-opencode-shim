@@ -8,6 +8,10 @@ The mix covers the three situations seen with OpenCode and other clients:
   client requires a structured answer (OpenCode structured output);
 - single-turn extraction into a required schema;
 - a forced function on the first turn.
+
+``expect_args`` holds golden values for the fields with exactly one right
+answer (see ``evals/golden.py``). Triage severity, ticket priority and
+free-text fields are left out on purpose.
 """
 
 from __future__ import annotations
@@ -157,6 +161,7 @@ SCENARIOS: list[dict[str, Any]] = [
         "tools": [GLOB, READ, FILES],
         "tool_choice": "required",
         "expect_tool": "StructuredOutput",
+        "expect_args": {"files": ("files", ["README.md", "PROBLEM.md"])},
     },
     {
         "id": "final-todo-count",
@@ -169,6 +174,7 @@ SCENARIOS: list[dict[str, Any]] = [
         "tools": [GLOB, READ, BASH, TODO],
         "tool_choice": "required",
         "expect_tool": "StructuredOutput",
+        "expect_args": {"count": ("exact", 3), "files": ("files", ["app.py", "db.py"])},
         "stream": True,
     },
     {
@@ -182,6 +188,7 @@ SCENARIOS: list[dict[str, Any]] = [
         "tools": [GLOB, READ, DEPS],
         "tool_choice": "required",
         "expect_tool": "StructuredOutput",
+        "expect_args": {"dependencies": ("names", ["fastapi", "httpx", "jsonschema"])},
     },
     {
         "id": "final-triage",
@@ -205,6 +212,7 @@ SCENARIOS: list[dict[str, Any]] = [
         "tools": [READ, SENTIMENT],
         "tool_choice": "required",
         "expect_tool": "StructuredOutput",
+        "expect_args": {"label": ("exact", "negative")},
     },
     {
         "id": "extract-person",
@@ -212,6 +220,11 @@ SCENARIOS: list[dict[str, Any]] = [
         "tools": [READ, PERSON],
         "tool_choice": "required",
         "expect_tool": "StructuredOutput",
+        "expect_args": {
+            "name": ("text", "Maria Souza"),
+            "age": ("exact", 34),
+            "city": ("text", "Recife"),
+        },
         "stream": True,
     },
     {
@@ -231,6 +244,7 @@ SCENARIOS: list[dict[str, Any]] = [
         "tools": [GLOB, FILES],
         "tool_choice": "required",
         "expect_tool": "StructuredOutput",
+        "expect_args": {"files": ("files", ["app.py", "db.py"])},
         "stream": True,
     },
     # Forced function on the first turn.
@@ -240,6 +254,7 @@ SCENARIOS: list[dict[str, Any]] = [
         "tools": [WEATHER, SEARCH],
         "tool_choice": _forced("get_weather"),
         "expect_tool": "get_weather",
+        "expect_args": {"city": ("text", "Lisbon")},
     },
     {
         "id": "forced-ticket",
@@ -262,6 +277,11 @@ SCENARIOS: list[dict[str, Any]] = [
         "tools": [CURRENCY, SEARCH],
         "tool_choice": _forced("convert_currency"),
         "expect_tool": "convert_currency",
+        "expect_args": {
+            "amount": ("exact", 250),
+            "from": ("oneof", ["USD", "US dollars", "US dollar"]),
+            "to": ("oneof", ["EUR", "euros", "euro"]),
+        },
         "stream": True,
     },
     # "required" where any action tool is a valid answer.
@@ -286,5 +306,6 @@ SCENARIOS: list[dict[str, Any]] = [
         "tools": [BASH, _structured({"result": {"type": "integer"}}, ["result"])],
         "tool_choice": "required",
         "expect_tool": "StructuredOutput",
+        "expect_args": {"result": ("exact", 391)},
     },
 ]
