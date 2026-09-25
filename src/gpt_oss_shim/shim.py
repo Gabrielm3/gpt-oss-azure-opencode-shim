@@ -10,14 +10,15 @@ recorded Azure behavior behind each fix.
    value other than ``"auto"``/``"none"`` to ``"auto"``.
 
 2. Credentials. The client sends a placeholder key; the shim sends the real
-   key as ``api-key`` and ``Authorization: Bearer``.
+   key as ``api-key`` and ``Authorization: Bearer``, or, with no key set, an
+   Entra ID bearer token (see ``auth.py``).
 
 3. Headers. The shim sets its own ``Content-Type`` and drops the client's, so
    Azure never receives ``application/json,application/json`` (HTTP 400).
 
 4. Local-only access. Requests from browsers (``Origin``, ``Sec-Fetch-Site``)
    or with a non-local ``Host`` get HTTP 403, because every forwarded request
-   carries the real API key.
+   carries real credentials.
 
 5. Tool-call polyfill. After the rewrite, the model sometimes misses the tool
    call: it writes the answer as JSON text, or leaks the call's arguments into
@@ -34,7 +35,8 @@ UPSTREAM_URL
     Base URL of the Azure OpenAI-compatible endpoint, e.g.
     ``https://<resource>.services.ai.azure.com/openai``. Required.
 AZURE_FOUNDRY_API_KEY
-    API key for the Azure AI Foundry resource. Required.
+    API key for the Azure AI Foundry resource. If unset, the shim uses Entra
+    ID (``DefaultAzureCredential``), which needs the ``entra`` extra.
 SHIM_HOST
     Bind address (default: ``127.0.0.1``).
 SHIM_PORT
@@ -87,6 +89,13 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .auth import (
+    ApiKeyAuth,
+    EntraAuth,
+    UpstreamAuth,
+    UpstreamAuthError,
+    default_entra_credential,
+)
 from .metrics import Metrics
 from .polyfill import (
     ForcedToolChoice,
@@ -159,22 +168,19 @@ def _load_config() -> dict[str, Any]:
     Raises
     ------
     RuntimeError
-        If a required variable (``UPSTREAM_URL`` or
-        ``AZURE_FOUNDRY_API_KEY``) is missing, or a numeric variable is invalid.
+        If ``UPSTREAM_URL`` is missing, or a numeric variable is invalid.
     """
     upstream = os.environ.get("UPSTREAM_URL", "").rstrip("/")
     api_key = os.environ.get("AZURE_FOUNDRY_API_KEY", "").strip()
 
     if not upstream:
         raise RuntimeError("UPSTREAM_URL environment variable is required")
-    if not api_key:
-        raise RuntimeError("AZURE_FOUNDRY_API_KEY environment variable is required")
 
     extra_hosts = _parse_host_list(os.environ.get("SHIM_ALLOWED_HOSTS", ""))
 
     return {
         "upstream": upstream,
-        "api_key": api_key,
+        "api_key": api_key or None,
         "host": os.environ.get("SHIM_HOST", "127.0.0.1"),
         "port": int(_env_number("SHIM_PORT", 9526)),
         "log_level": os.environ.get("SHIM_LOG_LEVEL", "info"),
@@ -294,7 +300,7 @@ def _hostname(host_header: str) -> str:
 def rejection_reason(headers: Mapping[str, str], allowed_hosts: frozenset[str]) -> str | None:
     """Return why a request must be refused, or ``None`` if it may pass.
 
-    The shim adds a real API key to every upstream call, so it only serves
+    The shim adds real credentials to every upstream call, so it only serves
     local, non-browser clients:
 
     - Browsers send ``Origin`` on cross-origin POSTs, including CORS "simple"
@@ -335,14 +341,25 @@ class LocalOnlyMiddleware:
         await self.app(scope, receive, send)
 
 
-def build_upstream_headers(config: dict[str, Any]) -> dict[str, str]:
-    """Build the headers injected on every upstream request."""
-    return {
-        "api-key": config["api_key"],
-        "Authorization": f"Bearer {config['api_key']}",
-        "Content-Type": "application/json",
-        "Accept-Encoding": "identity",
-    }
+# Headers set on every upstream request, besides the credentials.
+UPSTREAM_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept-Encoding": "identity",
+}
+
+
+def build_upstream_auth(config: dict[str, Any]) -> UpstreamAuth:
+    """API key auth when a key is configured, Entra ID otherwise.
+
+    Raises
+    ------
+    RuntimeError
+        If Entra ID is needed and the ``entra`` extra is not installed.
+    """
+    api_key = config.get("api_key")
+    if api_key:
+        return ApiKeyAuth(api_key)
+    return EntraAuth(default_entra_credential())
 
 
 def sanitize_chat_body(raw: bytes) -> tuple[bytes, list[str]]:
@@ -384,6 +401,7 @@ def create_app(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
     tracer: Any | None = None,
+    auth: UpstreamAuth | None = None,
 ) -> FastAPI:
     """Application factory.
 
@@ -397,9 +415,13 @@ def create_app(
         in tests. Defaults to real network I/O.
     tracer
         Optional OpenTelemetry tracer. Without one, no spans are produced.
+    auth
+        Optional upstream credentials. Defaults to ``build_upstream_auth``.
     """
     if config is None:
         config = _load_config()
+    if auth is None:
+        auth = build_upstream_auth(config)
 
     # One client for the app's lifetime: connections to Azure are pooled and
     # reused instead of paying a TCP + TLS handshake on every request.
@@ -430,7 +452,6 @@ def create_app(
     )
 
     upstream = config["upstream"]
-    auth_headers = build_upstream_headers(config)
     mode = PolyfillMode(config.get("tool_polyfill", PolyfillMode.ON))
     trace_dir = config.get("trace_dir")
     traces = (
@@ -529,7 +550,13 @@ def create_app(
         forward_headers = {
             k: v for k, v in request.headers.items() if k.lower() not in _STRIPPED_REQUEST_HEADERS
         }
-        forward_headers.update(auth_headers)
+        forward_headers.update(UPSTREAM_HEADERS)
+        try:
+            forward_headers.update(await auth.headers())
+        except UpstreamAuthError as exc:
+            return done(
+                upstream_auth_error_response(exc), Outcome.UPSTREAM_ERROR, span=span, error=exc
+            )
 
         url = f"{upstream}/{path}"
         if request.url.query:
@@ -674,6 +701,20 @@ def upstream_error_response(exc: httpx.HTTPError) -> JSONResponse:
     return JSONResponse(status_code=status, content=payload)
 
 
+def upstream_auth_error_response(exc: UpstreamAuthError) -> JSONResponse:
+    """Log a credential failure (e.g. an expired ``az login``) and return a 502."""
+    logger.error("could not get upstream credentials: %s", exc)
+    return JSONResponse(
+        status_code=502,
+        content={
+            "error": {
+                "message": "the shim could not get Azure credentials; see its log",
+                "type": "upstream_auth_error",
+            }
+        },
+    )
+
+
 def forwardable_response_headers(headers: httpx.Headers) -> dict[str, str]:
     """Upstream response headers that still hold after the shim relays the body.
 
@@ -755,9 +796,10 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "GPT-OSS on Azure AI Foundry."
         ),
         epilog=(
-            "Configuration comes from environment variables: UPSTREAM_URL and "
-            "AZURE_FOUNDRY_API_KEY are required; SHIM_PORT, SHIM_TOOL_POLYFILL, "
-            "SHIM_TRACE_DIR and the others are listed in the README."
+            "Configuration comes from environment variables: UPSTREAM_URL is "
+            "required; AZURE_FOUNDRY_API_KEY is the API key (without it, Entra ID "
+            "auth is used); SHIM_PORT, SHIM_TOOL_POLYFILL, SHIM_TRACE_DIR and the "
+            "others are listed in the README."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -775,6 +817,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config = _load_config()
         configure_logging(config["log_level"])
+        auth = build_upstream_auth(config)
     except RuntimeError as exc:
         logger.error("%s", exc)
         return 1
@@ -782,14 +825,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not is_loopback_bind(config["host"]):
         logger.warning(
             "SHIM_HOST=%s is reachable from the network. The shim has no inbound "
-            "authentication and adds the Azure API key to every request it forwards.",
+            "authentication and adds Azure credentials to every request it forwards.",
             config["host"],
         )
 
     import uvicorn
 
     uvicorn.run(
-        create_app(config, tracer=build_tracer(__version__)),
+        create_app(config, tracer=build_tracer(__version__), auth=auth),
         host=config["host"],
         port=config["port"],
         log_level=config["log_level"],

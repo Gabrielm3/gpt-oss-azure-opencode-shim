@@ -41,6 +41,18 @@ def test_missing_configuration_exits_with_an_error(monkeypatch: pytest.MonkeyPat
     assert shim.main([]) == 1
 
 
+def test_entra_without_the_extra_exits_with_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UPSTREAM_URL", "https://upstream.test/openai")
+    monkeypatch.delenv("AZURE_FOUNDRY_API_KEY", raising=False)
+
+    def missing_extra() -> None:
+        raise RuntimeError("needs the entra extra")
+
+    monkeypatch.setattr(shim, "default_entra_credential", missing_extra)
+
+    assert shim.main([]) == 1
+
+
 @pytest.mark.parametrize("days", ["0", "-3", "x"])
 def test_report_rejects_a_window_that_is_not_a_positive_number(tmp_path, days: str) -> None:
     with pytest.raises(SystemExit) as exit_info:

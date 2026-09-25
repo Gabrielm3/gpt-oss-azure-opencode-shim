@@ -264,6 +264,8 @@ shim_forced_request_duration_seconds_count{outcome="rescued"} 13.0
 
 The client sends a placeholder key. The shim sends the real key as both `api-key` and `Authorization: Bearer` (Azure accepts either). The key lives only in the shim's environment file, which the Quick Start and `install.sh` create with mode `600`.
 
+**Keyless (Entra ID).** Leave `AZURE_FOUNDRY_API_KEY` unset and install the `[entra]` extra (`uv tool install 'gpt-oss-azure-opencode-shim[entra]'`). The shim then sends an Entra ID bearer token from `DefaultAzureCredential`: an `az login` session, a managed identity, or workload identity federation in CI. Tokens are cached and refreshed 5 minutes before they expire. Your identity needs a data-plane role on the resource, such as `Cognitive Services OpenAI User` or `Azure AI User`. If no token can be obtained (for example, an expired `az login`), the request fails with HTTP 502 `upstream_auth_error`, is counted as `upstream_error` in `/metrics`, and the cause is logged. With Entra ID, the resource can run with key auth disabled (`disableLocalAuth`).
+
 ### 5. Header hygiene
 
 The shim sets its own `Content-Type` and drops the client's copy, plus `Authorization`, `Accept-Encoding`, and hop-by-hop headers. Azure rejects a duplicated `Content-Type` (`application/json,application/json`) with HTTP 400.
@@ -395,7 +397,7 @@ Do not expose the shim on a network interface. The `Host` check does not stop a 
 | Variable                | Required | Default     | Description                                          |
 | ----------------------- | -------- | ----------- | ---------------------------------------------------- |
 | `UPSTREAM_URL`          | yes      | —           | Azure Foundry base URL (no `/v1`)                    |
-| `AZURE_FOUNDRY_API_KEY` | yes      | —           | Azure resource key                                   |
+| `AZURE_FOUNDRY_API_KEY` | no       | —           | Azure resource key; unset = Entra ID (`[entra]`)     |
 | `SHIM_HOST`             | no       | `127.0.0.1` | Bind address                                         |
 | `SHIM_PORT`             | no       | `9526`      | Bind port                                            |
 | `SHIM_LOG_LEVEL`        | no       | `info`      | Log level for the shim and uvicorn                   |
