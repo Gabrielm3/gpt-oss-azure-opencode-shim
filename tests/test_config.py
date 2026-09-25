@@ -40,11 +40,10 @@ def test_missing_upstream_url_raises(env: pytest.MonkeyPatch) -> None:
         _load_config()
 
 
-def test_missing_api_key_raises(env: pytest.MonkeyPatch) -> None:
+def test_missing_api_key_means_entra_auth(env: pytest.MonkeyPatch) -> None:
     env.delenv("AZURE_FOUNDRY_API_KEY")
 
-    with pytest.raises(RuntimeError, match="AZURE_FOUNDRY_API_KEY"):
-        _load_config()
+    assert _load_config()["api_key"] is None
 
 
 def test_upstream_trailing_slash_is_stripped(env: pytest.MonkeyPatch) -> None:
