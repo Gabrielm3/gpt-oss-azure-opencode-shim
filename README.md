@@ -343,6 +343,29 @@ The fixtures in `tests/fixtures/polyfill/` were recorded this way from `gpt-oss-
 
 ---
 
+### Dashboard, SLOs and alerts
+
+`observability/` holds a local Prometheus and Grafana stack, with the dashboard, recording rules and alerts versioned as code:
+
+```bash
+docker compose -f observability/docker-compose.yml up -d
+# Grafana: http://127.0.0.1:3000 (dashboard "gpt-oss shim")   Prometheus: http://127.0.0.1:9090/alerts
+```
+
+Both containers use the host network and listen on 127.0.0.1, because the shim accepts only local `Host` headers. The images are pinned by digest and updated by Dependabot.
+
+| Alert | Fires when |
+| ----- | ---------- |
+| `ShimErrorBudgetFastBurn` (page) | SLO: 99% of requests end without `upstream_error` or `empty_choices`. Burn rate above 14.4× over 1 h and 5 min |
+| `ShimErrorBudgetSlowBurn` (ticket) | Burn rate above 6× over 6 h and 30 min |
+| `ShimStalledTurnsHigh` | More than 15% of forced requests get no tool call in 1 h (with at least 20 requests); the eval baseline is about 7% |
+| `ShimForcedLatencyHigh`, `ShimTimeToFirstTokenHigh` | p95 above 60 s (forced) or 10 s (first token), sustained for 15 min |
+| `ShimDailyCostHigh` | Estimated spend above USD 1 in 24 h |
+| `ShimUsageMissing` | Answers stop reporting token usage |
+| `ShimDown` | Prometheus cannot scrape `/metrics` for 5 min |
+
+The burn-rate pairs follow the multiwindow pattern from the Google SRE workbook. `observability/prometheus/rules.test.yml` runs every alert against synthetic series with `promtool test rules` in CI. The tests use the exact metric names the shim exports, so a rename fails the build. The stack has no Alertmanager: alerts show up on the Prometheus alerts page. To route them, add an Alertmanager with your receiver.
+
 ## Evaluation
 
 How the evals run in CI/CD, from PR gates to a nightly drift canary with a statistical gate: [`docs/EVALS.md`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/docs/EVALS.md).

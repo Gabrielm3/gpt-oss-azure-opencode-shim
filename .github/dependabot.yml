@@ -18,6 +18,15 @@ updates:
       base-images:
         patterns: ["*"]
 
+  # Prometheus and Grafana in the local monitoring stack, pinned by digest.
+  - package-ecosystem: docker-compose
+    directory: /observability
+    schedule:
+      interval: weekly
+    groups:
+      observability-images:
+        patterns: ["*"]
+
   # Hash-pinned build and publish tools (.github/release-requirements.txt).
   - package-ecosystem: pip
     directory: /.github
