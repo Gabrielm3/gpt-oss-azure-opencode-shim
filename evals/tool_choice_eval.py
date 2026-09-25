@@ -21,8 +21,15 @@ Usage::
         --target shim=http://127.0.0.1:9526/v1/chat/completions \\
         --repeat 2 --out eval-results.json
 
-A target named ``direct`` sends ``AZURE_FOUNDRY_API_KEY`` as the ``api-key``
-header. Other targets are assumed to be a shim and get no credentials.
+A target named ``direct`` goes straight to Azure: it sends
+``AZURE_FOUNDRY_API_KEY`` as ``api-key`` when that is set, and an Entra ID
+token from ``DefaultAzureCredential`` otherwise (needs the ``entra`` extra).
+Other targets are assumed to be a shim and get no credentials.
+
+``--model`` takes a comma-separated list to compare models on the same
+scenarios; each target then runs once per model and is labelled
+``target:model``. A third table reports tokens and the estimated cost at list
+price (``SHIM_PRICES``), per request and per strict success.
 """
 
 from __future__ import annotations
@@ -41,7 +48,10 @@ from jsonschema.validators import validator_for
 
 from evals.golden import args_correct
 from evals.scenarios import SCENARIOS
+from gpt_oss_shim.auth import ENTRA_SCOPE
 from gpt_oss_shim.stats import format_rate, percentile
+from gpt_oss_shim.telemetry import response_summary
+from gpt_oss_shim.usage import PriceTable, usage_from_summary
 
 OUTCOME_HEADER = "x-shim-outcome"
 
@@ -110,8 +120,38 @@ def progress(scenario: dict[str, Any], status: int, body: bytes, *, stream: bool
     return ok
 
 
+class DirectAuth:
+    """Credentials for the ``direct`` target: the API key, or a cached Entra token."""
+
+    def __init__(self) -> None:
+        self._credential: Any = None
+        self._token = ""
+        self._expires_on = 0.0
+
+    def headers(self) -> dict[str, str]:
+        key = os.environ.get("AZURE_FOUNDRY_API_KEY", "").strip()
+        if key:
+            return {"api-key": key}
+        if time.time() > self._expires_on - 300:
+            if self._credential is None:
+                from azure.identity import DefaultAzureCredential
+
+                self._credential = DefaultAzureCredential()
+            access = self._credential.get_token(ENTRA_SCOPE)
+            self._token, self._expires_on = access.token, float(access.expires_on)
+        return {"Authorization": f"Bearer {self._token}"}
+
+
 def run_once(
-    client: httpx.Client, target: str, url: str, scenario: dict[str, Any], model: str
+    client: httpx.Client,
+    target: str,
+    url: str,
+    scenario: dict[str, Any],
+    model: str,
+    *,
+    direct_auth: DirectAuth | None = None,
+    prices: PriceTable | None = None,
+    label: str | None = None,
 ) -> dict[str, Any]:
     stream = bool(scenario.get("stream"))
     payload = {
@@ -124,7 +164,7 @@ def run_once(
     }
     headers = {"content-type": "application/json"}
     if target == "direct":
-        headers["api-key"] = os.environ["AZURE_FOUNDRY_API_KEY"]
+        headers.update((direct_auth or DirectAuth()).headers())
     started = time.perf_counter()
     try:
         response = client.post(url, json=payload, headers=headers)
@@ -137,8 +177,14 @@ def run_once(
         status, body, outcome = 0, b"", f"transport:{type(exc).__name__}"
     seconds = time.perf_counter() - started
     ok, reason = score(scenario, status, body, stream=stream) if status else (False, outcome)
+    usage = usage_from_summary(response_summary(body, is_sse=stream)) if status == 200 else None
+    cost = (prices or PriceTable.from_env()).cost(model, usage) if usage else None
     return {
-        "target": target,
+        "target": label or target,
+        "model": model,
+        "input_tokens": usage.input_tokens if usage else None,
+        "output_tokens": usage.output_tokens if usage else None,
+        "cost_usd": cost,
         "scenario": scenario["id"],
         "stream": stream,
         "ok": ok,
@@ -212,6 +258,33 @@ def _args_rate(rows: list[dict[str, Any]]) -> str:
     return format_rate(sum(r["args"] for r in rows), len(rows)) if rows else "—"
 
 
+def summarize_cost(records: list[dict[str, Any]]) -> str:
+    """Render tokens and estimated list-price cost per target.
+
+    ``Per success`` divides the spend by strict successes: what one usable
+    tool call costs, retries included.
+    """
+    lines = [
+        "| Target | Mean input tok | Mean output tok | Est. USD / 1k requests | Est. USD / success |",
+        "| ------ | -------------- | --------------- | ---------------------- | ------------------ |",
+    ]
+    for target in dict.fromkeys(r["target"] for r in records):
+        rows = [r for r in records if r["target"] == target]
+        metered = [r for r in rows if r.get("input_tokens") is not None]
+        priced = [r for r in metered if r.get("cost_usd") is not None]
+        if not metered:
+            lines.append(f"| {target} | — | — | — | — |")
+            continue
+        mean_in = sum(r["input_tokens"] for r in metered) / len(metered)
+        mean_out = sum(r["output_tokens"] for r in metered) / len(metered)
+        spend = sum(r["cost_usd"] for r in priced)
+        successes = sum(r["ok"] for r in rows)
+        per_k = f"{1000 * spend / len(priced):.3f}" if priced else "—"
+        per_success = f"{spend / successes:.5f}" if priced and successes else "—"
+        lines.append(f"| {target} | {mean_in:.0f} | {mean_out:.0f} | {per_k} | {per_success} |")
+    return "\n".join(lines)
+
+
 def _counts(counter: Counter) -> str:
     return ", ".join(f"{k} {v}" for k, v in counter.most_common()) or "—"
 
@@ -220,21 +293,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--target", action="append", required=True, metavar="NAME=URL")
     parser.add_argument("--repeat", type=int, default=1)
-    parser.add_argument("--model", default=os.environ.get("MODEL", "gpt-oss-120b"))
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("MODEL", "gpt-oss-120b"),
+        help="deployment name, or a comma-separated list to compare models",
+    )
     parser.add_argument("--out", help="write every run as JSON to this file")
     args = parser.parse_args(argv)
 
     targets = [t.split("=", 1) for t in args.target]
+    models = [m.strip() for m in args.model.split(",") if m.strip()]
+    direct_auth, prices = DirectAuth(), PriceTable.from_env()
     records = []
     with httpx.Client(timeout=httpx.Timeout(300, connect=10)) as client:
         for _ in range(args.repeat):
             for scenario in SCENARIOS:
-                for name, url in targets:
-                    record = run_once(client, name, url, scenario, args.model)
+                for (name, url), model in ((t, m) for t in targets for m in models):
+                    record = run_once(
+                        client,
+                        name,
+                        url,
+                        scenario,
+                        model,
+                        direct_auth=direct_auth,
+                        prices=prices,
+                        label=f"{name}:{model}" if len(models) > 1 else name,
+                    )
                     records.append(record)
                     mark = "ok  " if record["ok"] else "FAIL"
                     print(
-                        f"{mark} {name:<10} {scenario['id']:<24} {record['reason']:<22} "
+                        f"{mark} {record['target']:<24} {scenario['id']:<24} {record['reason']:<22} "
                         f"{record['outcome'] or '':<14} {record['seconds']:.1f}s",
                         file=sys.stderr,
                         flush=True,
@@ -245,6 +333,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(summarize(records))
     print()
     print(summarize_args(records))
+    print()
+    print(summarize_cost(records))
     return 0
 
 

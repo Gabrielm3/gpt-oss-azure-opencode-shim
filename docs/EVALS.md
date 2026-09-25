@@ -95,6 +95,40 @@ First run on 2026-09-25 (shim, 15 scenarios × 2): 16/16 arguments correct
 (95% CI 81–100%), all native. The run had no scored rescues, so polyfill
 precision needs pooled nights before it says anything.
 
+### Model comparison
+
+`--model gpt-oss-120b,gpt-5-mini` runs every target once per model on the
+same scenarios. Each model runs both direct and through the shim. Without the
+direct arm, the table would measure the shim's `tool_choice` rewrite, not the
+model. A third table adds tokens and the list-price cost per request and per
+strict success. The `direct` target uses the API key when it is set and an
+Entra ID token otherwise.
+
+2026-09-25, 15 scenarios × 4 per arm (240 requests, about USD 0.05):
+
+| Arm | Strict success | Stalled | Args correct | p50 / p95 s | USD / 1k successes |
+| --- | -------------- | ------- | ------------ | ----------- | ------------------ |
+| gpt-oss-120b direct | 0/60 (0–6%) | 16/16 | — | 0.2 / 0.7 | — (44 × HTTP 400) |
+| gpt-oss-120b shim | **54/60 (80–95%)** | 4/60 (3–16%) | 32/32 (89–100%) | **0.6 / 1.1** | **0.10** |
+| gpt-5-mini direct | 50/60 (72–91%) | **0/60 (0–6%)** | 29/30 (83–99%) | 2.5 / 5.1 | 0.45 |
+| gpt-5-mini shim | 46/60 (65–86%) | 4/60 (3–16%) | 27/28 (82–99%) | 1.7 / 6.6 | 0.36 |
+
+What it shows:
+
+- **gpt-oss-120b through the shim is the best trade-off** for this workload:
+  the highest strict success, about 4× cheaper per success and about 4×
+  faster at p50 than gpt-5-mini. Without the shim it cannot answer a forced
+  call at all.
+- **gpt-5-mini never stalls when called directly**, because it supports forced
+  `tool_choice` natively. Its strict misses are all a different, valid tool
+  (`read` before `StructuredOutput`), so progress is 60/60.
+- **The shim makes gpt-5-mini worse**: stalls go from 0/60 to 4/60, because
+  the rewrite to `"auto"` removes a constraint the model honors. The rewrite
+  should apply only to models that need it (the gpt-oss family). That is the
+  next change to the shim.
+- The intervals overlap for success, so "gpt-oss-120b is more accurate" is
+  not proven at n=60. The cost and latency gaps are far outside the noise.
+
 ### When the gate fires
 
 - **Drift:** the run fails and an `eval-drift` issue is opened, or commented
