@@ -88,8 +88,9 @@ The baseline changes only through a reviewed PR, like any golden file.
 ## Cost and safety
 
 - **Cost:** one run is 60 requests with at most 2,048 output tokens each.
-  `timeout-minutes` and a single-run `concurrency` group bound it. There is
-  no Azure budget alert yet; that belongs to the planned infrastructure code.
+  `timeout-minutes` and a single-run `concurrency` group bound it. A yearly
+  Azure budget (`infra/budget.tf`) emails the subscription Owner at 20%, 50%,
+  80% and 100% of actual spend.
 - **Secrets:** the Azure key and URL live on the `live-eval` GitHub
   environment, which only `master` can use. The workflow never runs on
   `pull_request`, so code from a fork can never reach them. The shim's own log,
