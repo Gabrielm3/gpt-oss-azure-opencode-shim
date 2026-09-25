@@ -6,6 +6,7 @@ OpenTofu code for the Azure resources behind the shim:
 |---|---|
 | AI Services account (`azurerm_cognitive_account.foundry`) | yes |
 | `gpt-oss-120b` deployment (`azurerm_cognitive_deployment.gpt_oss`) | yes |
+| Credit budget (`azurerm_consumption_budget_subscription.credit`) | yes |
 | Resource group, other deployments, Foundry project | no |
 | API keys | no. They are read-only attributes of the account. Rotate them with `az cognitiveservices account keys regenerate`. |
 
@@ -16,6 +17,12 @@ endpoint and the keys. Both resources have `prevent_destroy`.
 The deployment uses `version_upgrade_option = "NoAutoUpgrade"`. Model upgrades
 go through a PR, and the live eval (`docs/EVALS.md`) confirms that behavior
 did not regress.
+
+## Credit budget
+
+`budget.tf` emails the subscription Owner at 20%, 50%, 80% and 100% of actual
+spend, and at 100% forecast (Azure caps budgets at 5 notifications). Out of
+credit means the subscription is disabled. Cost data lags 8-24h, so act on 80%.
 
 ## State
 
@@ -52,7 +59,7 @@ az storage container create --account-name "$SA" -n drift-reports --auth-mode lo
 az identity create -g "$RG" -n id-azure-shim-drift -l northcentralus
 az identity federated-credential create -g "$RG" --identity-name id-azure-shim-drift \
   -n github-infra-drift --issuer https://token.actions.githubusercontent.com \
-  --subject "repo:Gabrielm3@48194646/gpt-oss-azure-opencode-shim@1380006725:environment:infra-drift" \
+  --subject "repo:<owner>@<owner id>/<repo>@<repo id>:environment:infra-drift" \
   --audiences api://AzureADTokenExchange
 ```
 
@@ -101,7 +108,8 @@ fails and opens (or comments on) an `infra-drift` issue.
   needed.
 - **Least privilege:** the custom role `Azure Shim Drift Reader` on the
   account, `Storage Blob Data Reader` on `tfstate` (the plan runs with
-  `-lock=false`), and `Storage Blob Data Contributor` on `drift-reports` only.
+  `-lock=false`), `Storage Blob Data Contributor` on `drift-reports` only,
+  and `Cost Management Reader` on the `credit` budget only.
   The identity cannot change Azure.
 - **Accepted tradeoff: CI can read the API keys.** Plain `Reader` is not
   enough. The azurerm provider calls `listKeys` on every refresh of an account
