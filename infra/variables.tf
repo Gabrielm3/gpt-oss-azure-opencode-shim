@@ -41,6 +41,11 @@ variable "location" {
   default     = "northcentralus"
 }
 
+variable "credit_budget_amount" {
+  type    = number
+  default = 520
+}
+
 variable "gpt_oss_capacity" {
   description = "gpt-oss-120b deployment capacity, in thousands of tokens per minute."
   type        = number
