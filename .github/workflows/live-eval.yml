@@ -3,8 +3,10 @@ name: Live eval (drift canary)
 # Nightly: run the forced-tool eval through the shim on master against the real
 # Azure deployment and compare it with evals/baseline.json (see docs/EVALS.md).
 # The code does not change between nights, so drift here means the upstream
-# model changed. Never triggered by pull requests: the job holds Azure
-# credentials, and forks must not reach them.
+# model changed. Never triggered by pull requests: the job can get Azure
+# credentials, and forks must not reach them. Auth is keyless: GitHub OIDC
+# logs in the id-azure-shim-eval managed identity, and the shim uses that
+# az session for Entra ID tokens.
 #
 # GitHub disables scheduled workflows after 60 days without repository
 # activity; re-enable it from the Actions tab when that happens.
@@ -33,6 +35,7 @@ jobs:
     environment: live-eval
     permissions:
       contents: read # checkout only
+      id-token: write # OIDC token for the Azure managed identity
     outputs:
       verdict: ${{ steps.gate.outputs.verdict }}
     steps:
@@ -46,20 +49,25 @@ jobs:
           cache: pip
 
       - name: Install
-        run: python -m pip install -e .
+        run: python -m pip install -e ".[entra]"
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Check inputs and credentials
         env:
           REPEAT: ${{ inputs.repeat || '4' }}
           UPSTREAM_URL: ${{ secrets.UPSTREAM_URL }}
-          AZURE_FOUNDRY_API_KEY: ${{ secrets.AZURE_FOUNDRY_API_KEY }}
         run: |
           if ! [[ "$REPEAT" =~ ^[2-8]$ ]]; then
             echo "::error::repeat must be a whole number from 2 to 8"
             exit 1
           fi
-          if [ -z "$UPSTREAM_URL" ] || [ -z "$AZURE_FOUNDRY_API_KEY" ]; then
-            echo "::error::set UPSTREAM_URL and AZURE_FOUNDRY_API_KEY on the live-eval environment"
+          if [ -z "$UPSTREAM_URL" ]; then
+            echo "::error::set UPSTREAM_URL on the live-eval environment"
             exit 1
           fi
           echo "REPEAT=$REPEAT" >> "$GITHUB_ENV"
@@ -69,7 +77,6 @@ jobs:
       - name: Start the shim
         env:
           UPSTREAM_URL: ${{ secrets.UPSTREAM_URL }}
-          AZURE_FOUNDRY_API_KEY: ${{ secrets.AZURE_FOUNDRY_API_KEY }}
           SHIM_TOOL_POLYFILL: "on"
           SHIM_TRACE_DIR: ${{ runner.temp }}/live-eval/traces
         run: |

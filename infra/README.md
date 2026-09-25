@@ -61,6 +61,15 @@ az identity federated-credential create -g "$RG" --identity-name id-azure-shim-d
   -n github-infra-drift --issuer https://token.actions.githubusercontent.com \
   --subject "repo:<owner>@<owner id>/<repo>@<repo id>:environment:infra-drift" \
   --audiences api://AzureADTokenExchange
+
+# Live eval identity: data plane only, trusted only for the live-eval environment
+az identity create -g "$RG" -n id-azure-shim-eval -l northcentralus
+az identity federated-credential create -g "$RG" --identity-name id-azure-shim-eval \
+  -n github-live-eval --issuer https://token.actions.githubusercontent.com \
+  --subject "repo:<owner>@<owner id>/<repo>@<repo id>:environment:live-eval" \
+  --audiences api://AzureADTokenExchange
+# + Cognitive Services OpenAI User on the account; AZURE_CLIENT_ID,
+#   AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID secrets on the live-eval environment
 ```
 
 This repo's OIDC tokens use GitHub's immutable subject format
