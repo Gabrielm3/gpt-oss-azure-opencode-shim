@@ -1,6 +1,6 @@
 # gpt-oss-azure-opencode-shim
 
-> A small local HTTP shim for **Azure-hosted GPT-OSS models**. It rewrites the forced `tool_choice` values that Azure AI Foundry rejects, turns answers that miss the required tool call back into that tool call, reports what it did on every request, and keeps the API key out of the client configuration.
+> A local HTTP shim for **Azure-hosted GPT-OSS models**. It rewrites the forced `tool_choice` values that Azure AI Foundry rejects, turns answers that miss the required tool call back into that tool call, reports what it did on every request, and keeps the API key out of the client configuration.
 
 [![PyPI](https://img.shields.io/pypi/v/gpt-oss-azure-opencode-shim.svg)](https://pypi.org/project/gpt-oss-azure-opencode-shim/)
 [![CI](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/actions/workflows/ci.yml/badge.svg)](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/actions/workflows/ci.yml)
@@ -276,7 +276,7 @@ Azure sends `usage` at the end of a stream without `stream_options`, so the shim
 
 The client sends a placeholder key. The shim sends the real key as both `api-key` and `Authorization: Bearer` (Azure accepts either). The key lives only in the shim's environment file, which the Quick Start and `install.sh` create with mode `600`.
 
-**Keyless (Entra ID).** Leave `AZURE_FOUNDRY_API_KEY` unset and install the `[entra]` extra (`uv tool install 'gpt-oss-azure-opencode-shim[entra]'`). The shim then sends an Entra ID bearer token from `DefaultAzureCredential`: an `az login` session, a managed identity, or workload identity federation in CI. Tokens are cached and refreshed 5 minutes before they expire. Your identity needs a data-plane role on the resource, such as `Cognitive Services OpenAI User` or `Azure AI User`. If no token can be obtained (for example, an expired `az login`), the request fails with HTTP 502 `upstream_auth_error`, is counted as `upstream_error` in `/metrics`, and the cause is logged. With Entra ID, the resource can run with key auth disabled (`disableLocalAuth`).
+**Keyless (Entra ID).** Leave `AZURE_FOUNDRY_API_KEY` unset and install the `[entra]` extra (`uv tool install 'gpt-oss-azure-opencode-shim[entra]'`). The shim then sends an Entra ID bearer token from `DefaultAzureCredential`: an `az login` session, a managed identity, or workload identity federation in CI. Tokens are cached and refreshed 5 minutes before they expire. Your identity needs a data-plane role on the resource, such as `Cognitive Services OpenAI User` or `Foundry User`. If no token can be obtained (for example, an expired `az login`), the request fails with HTTP 502 `upstream_auth_error`, is counted as `upstream_error` in `/metrics`, and the cause is logged. With Entra ID, the resource can run with key auth disabled (`disableLocalAuth`).
 
 ### 5. Header hygiene
 
@@ -342,6 +342,29 @@ python -m evals.fixtures promote TRACES.jsonl --line 41 --id reasoning-leak \
 The fixtures in `tests/fixtures/polyfill/` were recorded this way from `gpt-oss-120b` and cover both rescued shapes, the three shapes left unchanged (including a leaked call whose JSON is truncated, where completing it would mean inventing arguments) and two native tool calls.
 
 ---
+
+### Dashboard, SLOs and alerts
+
+`observability/` holds a local Prometheus and Grafana stack, with the dashboard, recording rules and alerts versioned as code:
+
+```bash
+docker compose -f observability/docker-compose.yml up -d
+# Grafana: http://127.0.0.1:3000 (dashboard "gpt-oss shim")   Prometheus: http://127.0.0.1:9090/alerts
+```
+
+Both containers use the host network and listen on 127.0.0.1, because the shim accepts only local `Host` headers. The images are pinned by digest and updated by Dependabot.
+
+| Alert | Fires when |
+| ----- | ---------- |
+| `ShimErrorBudgetFastBurn` (page) | SLO: 99% of requests end without `upstream_error` or `empty_choices`. Burn rate above 14.4× over 1 h and 5 min |
+| `ShimErrorBudgetSlowBurn` (ticket) | Burn rate above 6× over 6 h and 30 min |
+| `ShimStalledTurnsHigh` | More than 15% of forced requests get no tool call in 1 h (with at least 20 requests); the eval baseline is about 7% |
+| `ShimForcedLatencyHigh`, `ShimTimeToFirstTokenHigh` | p95 above 60 s (forced) or 10 s (first token), sustained for 15 min |
+| `ShimDailyCostHigh` | Estimated spend above USD 1 in 24 h |
+| `ShimUsageMissing` | Answers stop reporting token usage |
+| `ShimDown` | Prometheus cannot scrape `/metrics` for 5 min |
+
+The burn-rate pairs follow the multiwindow pattern from the Google SRE workbook. `observability/prometheus/rules.test.yml` runs every alert against synthetic series with `promtool test rules` in CI. The tests use the exact metric names the shim exports, so a rename fails the build. The stack has no Alertmanager: alerts show up on the Prometheus alerts page. To route them, add an Alertmanager with your receiver.
 
 ## Evaluation
 

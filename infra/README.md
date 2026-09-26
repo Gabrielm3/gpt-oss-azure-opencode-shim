@@ -8,7 +8,7 @@ OpenTofu code for the Azure resources behind the shim:
 | `gpt-oss-120b` deployment (`azurerm_cognitive_deployment.gpt_oss`) | yes |
 | Credit budget (`azurerm_consumption_budget_subscription.credit`) | yes |
 | Resource group, other deployments, Foundry project | no |
-| API keys | no. They are read-only attributes of the account. Rotate them with `az cognitiveservices account keys regenerate`. |
+| API keys | no. Key auth is disabled; every caller uses Entra ID. |
 
 Both resources existed before this code, so they were adopted with `import {}`
 blocks (`imports.tf`), not recreated. Recreating the account would change the
@@ -61,6 +61,15 @@ az identity federated-credential create -g "$RG" --identity-name id-azure-shim-d
   -n github-infra-drift --issuer https://token.actions.githubusercontent.com \
   --subject "repo:<owner>@<owner id>/<repo>@<repo id>:environment:infra-drift" \
   --audiences api://AzureADTokenExchange
+
+# Live eval identity: data plane only, trusted only for the live-eval environment
+az identity create -g "$RG" -n id-azure-shim-eval -l northcentralus
+az identity federated-credential create -g "$RG" --identity-name id-azure-shim-eval \
+  -n github-live-eval --issuer https://token.actions.githubusercontent.com \
+  --subject "repo:<owner>@<owner id>/<repo>@<repo id>:environment:live-eval" \
+  --audiences api://AzureADTokenExchange
+# + Cognitive Services OpenAI User on the account; AZURE_CLIENT_ID,
+#   AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID secrets on the live-eval environment
 ```
 
 This repo's OIDC tokens use GitHub's immutable subject format
@@ -111,14 +120,10 @@ fails and opens (or comments on) an `infra-drift` issue.
   `-lock=false`), `Storage Blob Data Contributor` on `drift-reports` only,
   and `Cost Management Reader` on the `credit` budget only.
   The identity cannot change Azure.
-- **Accepted tradeoff: CI can read the API keys.** Plain `Reader` is not
-  enough. The azurerm provider calls `listKeys` on every refresh of an account
-  with local auth enabled, and the plan fails if that call is denied. So the
-  custom role is Reader plus `listKeys`, scoped to this one account. The
-  identity works only from `master` through the `infra-drift` environment, and
-  the keys appear as `(sensitive value)` in the plan. The way to remove this
-  tradeoff is to switch the shim to Entra ID auth (`local_auth_enabled =
-  false`).
+- **No key access:** key auth is off (`local_auth_enabled = false`), so the
+  provider skips `listKeys` and the custom role is read-only.
+- **Re-enabling keys:** Azure cannot regenerate keys while key auth is off.
+  After setting `local_auth_enabled = true`, regenerate both keys before use.
 - **No public logs:** Actions logs on a public repo are public, and a plan
   prints the subscription ID and the endpoint. The full plan goes to the
   private `drift-reports/<run id>/` container, which deletes reports after 90

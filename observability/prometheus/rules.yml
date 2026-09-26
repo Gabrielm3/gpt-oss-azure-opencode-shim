@@ -1,0 +1,121 @@
+# Recording rules and alerts for the shim. Tested by rules.test.yml
+# (promtool test rules), which also pins the exported metric names.
+groups:
+  - name: shim-slo
+    # SLO: 99% of forwarded requests end without upstream_error or
+    # empty_choices (the client got no usable answer). Error budget: 1%.
+    rules:
+      - record: shim:slo_errors:ratio_rate5m
+        expr: |
+          sum(rate(shim_requests_total{outcome=~"upstream_error|empty_choices"}[5m]))
+          / sum(rate(shim_requests_total[5m]))
+      - record: shim:slo_errors:ratio_rate30m
+        expr: |
+          sum(rate(shim_requests_total{outcome=~"upstream_error|empty_choices"}[30m]))
+          / sum(rate(shim_requests_total[30m]))
+      - record: shim:slo_errors:ratio_rate1h
+        expr: |
+          sum(rate(shim_requests_total{outcome=~"upstream_error|empty_choices"}[1h]))
+          / sum(rate(shim_requests_total[1h]))
+      - record: shim:slo_errors:ratio_rate6h
+        expr: |
+          sum(rate(shim_requests_total{outcome=~"upstream_error|empty_choices"}[6h]))
+          / sum(rate(shim_requests_total[6h]))
+
+      # Multiwindow, multi-burn-rate alerts (Google SRE workbook, ch. 5).
+      # 14.4x spends 2% of a 30-day budget in 1 hour; 6x spends 5% in 6 hours.
+      - alert: ShimErrorBudgetFastBurn
+        expr: |
+          shim:slo_errors:ratio_rate1h > (14.4 * 0.01)
+          and shim:slo_errors:ratio_rate5m > (14.4 * 0.01)
+        labels:
+          severity: page
+        annotations:
+          summary: "Shim is burning its error budget 14x too fast"
+          description: "{{ $value | humanizePercentage }} of requests failed over 1h (SLO allows 1%). Check azure-shim.service logs and `az login`."
+      - alert: ShimErrorBudgetSlowBurn
+        expr: |
+          shim:slo_errors:ratio_rate6h > (6 * 0.01)
+          and shim:slo_errors:ratio_rate30m > (6 * 0.01)
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Shim is burning its error budget 6x too fast"
+          description: "{{ $value | humanizePercentage }} of requests failed over 6h (SLO allows 1%)."
+
+  - name: shim-quality
+    rules:
+      - record: shim:forced_stalled:ratio_rate1h
+        expr: |
+          sum(rate(shim_requests_total{outcome=~"failed|empty_choices"}[1h]))
+          / sum(rate(shim_requests_total{outcome=~"native|rescued|failed|empty_choices"}[1h]))
+      - record: shim:forced_requests:increase1h
+        expr: sum(increase(shim_requests_total{outcome=~"native|rescued|failed|empty_choices"}[1h]))
+
+      # The eval baseline stalls about 7% of forced turns; 15% on 20+
+      # requests is well outside that noise.
+      - alert: ShimStalledTurnsHigh
+        expr: |
+          shim:forced_stalled:ratio_rate1h > 0.15
+          and shim:forced_requests:increase1h >= 20
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Forced tool calls stall more than usual"
+          description: "{{ $value | humanizePercentage }} of forced requests got no tool call in the last hour. Run the live eval to check for model drift."
+
+  - name: shim-latency
+    rules:
+      - record: shim:forced_duration_seconds:p95_rate30m
+        expr: histogram_quantile(0.95, sum by (le) (rate(shim_forced_request_duration_seconds_bucket[30m])))
+      - record: shim:ttft_seconds:p95_rate30m
+        expr: histogram_quantile(0.95, sum by (le) (rate(shim_time_to_first_token_seconds_bucket[30m])))
+
+      - alert: ShimForcedLatencyHigh
+        expr: shim:forced_duration_seconds:p95_rate30m > 60
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "p95 latency of forced requests above 60 s"
+          description: "p95 is {{ $value | humanizeDuration }} over 30 min."
+      - alert: ShimTimeToFirstTokenHigh
+        expr: shim:ttft_seconds:p95_rate30m > 10
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "p95 time to first token above 10 s"
+          description: "p95 TTFT is {{ $value | humanizeDuration }} over 30 min."
+
+  - name: shim-cost
+    rules:
+      - record: shim:cost_usd:increase24h
+        expr: sum(increase(shim_cost_usd_total[24h]))
+
+      - alert: ShimDailyCostHigh
+        expr: shim:cost_usd:increase24h > 1
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Estimated spend above USD 1 in 24 h"
+          description: "Estimated {{ $value | printf \"%.2f\" }} USD in the last 24 h (list price)."
+      - alert: ShimUsageMissing
+        expr: sum(increase(shim_usage_missing_total[1h])) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: "Answers without token usage"
+          description: "Token and cost metrics undercount; the upstream stopped reporting usage."
+
+  - name: shim-up
+    rules:
+      - alert: ShimDown
+        expr: up{job="shim"} == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Prometheus cannot scrape the shim"
+          description: "azure-shim.service is down or not answering /metrics."
