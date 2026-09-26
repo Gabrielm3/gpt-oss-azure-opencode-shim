@@ -89,6 +89,30 @@ async def test_entra_failure_is_an_upstream_auth_error() -> None:
         await EntraAuth(BrokenCredential()).headers()
 
 
+class FlakyCredential(FakeCredential):
+    """Works once, then fails, like an ``az`` hiccup during refresh."""
+
+    def get_token(self, *scopes: str) -> Any:
+        if self.calls:
+            self.calls.append(scopes)
+            raise RuntimeError("az timed out")
+        return super().get_token(*scopes)
+
+
+async def test_failed_refresh_keeps_a_token_that_has_not_expired() -> None:
+    now = [1000.0]
+    credential = FlakyCredential(lambda: now[0])
+    auth = EntraAuth(credential, clock=lambda: now[0])
+    await auth.headers()
+
+    now[0] += 3600 - 60  # inside the refresh margin, still valid
+    assert (await auth.headers())["Authorization"] == "Bearer token-1"
+
+    now[0] += 60  # expired: nothing left to fall back on
+    with pytest.raises(UpstreamAuthError, match="az timed out"):
+        await auth.headers()
+
+
 def test_build_upstream_auth_prefers_the_api_key() -> None:
     assert isinstance(build_upstream_auth({"api_key": "k"}), ApiKeyAuth)
 

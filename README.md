@@ -115,15 +115,15 @@ docker run -d --name gpt-oss-shim --restart unless-stopped \
   -p 127.0.0.1:9526:9526 \
   --env-file ~/.config/gpt-oss-azure-opencode-shim.env \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
-  ghcr.io/gabrielm3/gpt-oss-azure-opencode-shim:0.4
+  ghcr.io/gabrielm3/gpt-oss-azure-opencode-shim:0.6
 ```
 
-**Keep `127.0.0.1:` in `-p`.** Inside the container the shim listens on all interfaces (hence the startup warning), so the port mapping is what keeps it local. `-p 9526:9526` would let any machine on your network send requests that the shim signs with your Azure key. Don't set `SHIM_HOST` in the env file for Docker. When another container calls the shim by service name (say `http://shim:9526` in Compose), add that name to `SHIM_ALLOWED_HOSTS`.
+**Keep `127.0.0.1:` in `-p`.** Inside the container the shim listens on all interfaces (hence the startup warning), so the port mapping is what keeps it local. `-p 9526:9526` would let any machine on your network send requests that the shim signs with your Azure credentials. Don't set `SHIM_HOST` in the env file for Docker. When another container calls the shim by service name (say `http://shim:9526` in Compose), add that name to `SHIM_ALLOWED_HOSTS`.
 
-The image is multi-arch (amd64, arm64), distroless (no shell), runs as a non-root user and holds the same wheel as the PyPI release. Each release carries an SBOM, build provenance and a signed attestation:
+The image is multi-arch (amd64, arm64), distroless (no shell), runs as a non-root user and holds the same wheel as the PyPI release, with the `otel` and `entra` extras. Without an API key it uses Entra ID; the image has no `az` CLI, so run it where a managed identity or workload identity provides the token. On a workstation, use the PyPI install with `az login` instead. Each release carries an SBOM, build provenance and a signed attestation:
 
 ```bash
-gh attestation verify oci://ghcr.io/gabrielm3/gpt-oss-azure-opencode-shim:0.4 --owner Gabrielm3
+gh attestation verify oci://ghcr.io/gabrielm3/gpt-oss-azure-opencode-shim:0.6 --owner Gabrielm3
 ```
 
 **4. Point OpenCode at the shim**
@@ -276,7 +276,7 @@ Azure sends `usage` at the end of a stream without `stream_options`, so the shim
 
 The client sends a placeholder key. The shim sends the real key as both `api-key` and `Authorization: Bearer` (Azure accepts either). The key lives only in the shim's environment file, which the Quick Start and `install.sh` create with mode `600`.
 
-**Keyless (Entra ID).** Leave `AZURE_FOUNDRY_API_KEY` unset and install the `[entra]` extra (`uv tool install 'gpt-oss-azure-opencode-shim[entra]'`). The shim then sends an Entra ID bearer token from `DefaultAzureCredential`: an `az login` session, a managed identity, or workload identity federation in CI. Tokens are cached and refreshed 5 minutes before they expire. Your identity needs a data-plane role on the resource, such as `Cognitive Services OpenAI User` or `Foundry User`. If no token can be obtained (for example, an expired `az login`), the request fails with HTTP 502 `upstream_auth_error`, is counted as `upstream_error` in `/metrics`, and the cause is logged. With Entra ID, the resource can run with key auth disabled (`disableLocalAuth`).
+**Keyless (Entra ID).** Leave `AZURE_FOUNDRY_API_KEY` unset and install the `[entra]` extra (`uv tool install 'gpt-oss-azure-opencode-shim[entra]'`). The shim then sends an Entra ID bearer token from `DefaultAzureCredential`: an `az login` session, a managed identity, or workload identity federation in CI. Tokens are cached and refreshed 5 minutes before they expire; if that refresh fails, the current token is used until it expires. With `az login` only, set `AZURE_TOKEN_CREDENTIALS=AzureCliCredential` so the credential skips the managed-identity probe: the first request on a laptop or WSL drops from about 4.7 s to 2 s. Your identity needs a data-plane role on the resource, such as `Cognitive Services OpenAI User` or `Foundry User`. If no token can be obtained (for example, an expired `az login`), the request fails with HTTP 502 `upstream_auth_error`, is counted as `upstream_error` in `/metrics`, and the cause is logged. With Entra ID, the resource can run with key auth disabled (`disableLocalAuth`).
 
 ### 5. Header hygiene
 
@@ -482,10 +482,10 @@ python3 -m venv .venv
 Releases go to PyPI through [trusted publishing](https://docs.pypi.org/trusted-publishers/): no API token is stored anywhere, and every file carries a PEP 740 attestation.
 
 1. Bump `version` in `pyproject.toml` (the only place it lives) and merge.
-2. Tag and push: `git tag -a v1.2.3 -m v1.2.3 && git push origin v1.2.3`.
+2. Tag the merged bump, never before: `git pull && grep -q '^version = "1.2.3"' pyproject.toml && git tag -a v1.2.3 -m v1.2.3 && git push origin v1.2.3`. Release tags are immutable (a repository ruleset blocks moving or deleting them), so a tag on the wrong commit burns that version.
 3. [`release.yml`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/.github/workflows/release.yml) builds once, checks the tag against the version, runs [`scripts/check-dist.sh`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/scripts/check-dist.sh) (metadata, wheel in a clean venv, full tests from the sdist), then waits for approval on the `pypi` environment before publishing and attaching the files to the GitHub release.
 
-Running the workflow by hand (`gh workflow run release.yml`) is a dry run to TestPyPI. Actions are pinned by commit SHA and build tools by hash, and Dependabot keeps both current.
+The workflow also refuses a tag that does not match `pyproject.toml`. Running the workflow by hand (`gh workflow run release.yml`) is a dry run to TestPyPI. Actions are pinned by commit SHA and build tools by hash, and Dependabot keeps both current.
 
 ---
 

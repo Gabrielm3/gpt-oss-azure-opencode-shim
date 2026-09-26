@@ -123,13 +123,14 @@ What it shows:
 - **gpt-5-mini never stalls when called directly**, because it supports forced
   `tool_choice` natively. Its strict misses all call a different offered tool
   with valid arguments (`read`, `glob`, `bash`), so progress is 60/60.
-- **The shim likely makes gpt-5-mini worse.** Stalls go from 0/60 direct to
-  4/60 through the shim. The mechanism is clear: the rewrite to `"auto"`
-  removes a constraint the model honors. But the 95% interval of the
-  difference (−1 to +16 points) still includes zero, so this is a strong
-  hypothesis, not a result yet. A gpt-5-mini-only rerun with more repeats
-  settles it. The proposed change is to apply the rewrite only to models that
-  need it (the gpt-oss family).
+- **The shim makes gpt-5-mini worse.** The rewrite to `"auto"` removes a
+  constraint the model honors. The first run (0/60 direct vs 4/60 shim) was
+  not significant, so it was rerun on 2026-09-26 with 15 scenarios × 8 per
+  arm (about USD 0.08, records in
+  `evals/results/2026-09-26-gpt-5-mini-rerun.json`): **0/120 stalled direct
+  vs 7/120 through the shim, difference +1.5 to +11.6 points (95% CI)**. Strict
+  success moves the same way (98/120 vs 92/120, within noise). The rewrite
+  should apply only to models that need it (the gpt-oss family).
 - The intervals overlap for success, so "gpt-oss-120b is more accurate" is
   not proven at n=60. The cost and latency gaps are far outside the noise.
 

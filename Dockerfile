@@ -16,7 +16,7 @@ FROM cgr.dev/chainguard/python:latest-dev@sha256:eb0d45dfc69fecb471d2eaee7a8eea2
 
 COPY dist/*.whl /tmp/dist/
 RUN python -m pip install --no-cache-dir --disable-pip-version-check \
-        --target /tmp/shim "$(ls /tmp/dist/*.whl)[otel]"
+        --target /tmp/shim "$(ls /tmp/dist/*.whl)[otel,entra]"
 
 FROM cgr.dev/chainguard/python:latest@sha256:565af762d7f3efedc4e60d7ac7815e41588211d3f5757be33d8303e915ee6c72
 
@@ -26,7 +26,11 @@ COPY --from=build /tmp/shim /opt/shim
 # port can reach it. Publish it on loopback only:
 #   docker run -p 127.0.0.1:9526:9526 ...
 # `-p 9526:9526` would let any machine on the network send requests that the
-# shim signs with your Azure key.
+# shim signs with your Azure credentials.
+#
+# Without AZURE_FOUNDRY_API_KEY the shim uses Entra ID. The image has no az
+# CLI, so the token comes from a managed identity (Azure hosts) or workload
+# identity (AKS), through DefaultAzureCredential.
 ENV PYTHONPATH=/opt/shim \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
