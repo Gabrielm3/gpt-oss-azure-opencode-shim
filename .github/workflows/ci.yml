@@ -141,3 +141,26 @@ jobs:
         run: |
           tofu init -backend=false -lockfile=readonly -no-color
           tofu validate -no-color
+
+  observability:
+    name: Observability (promtool and compose)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The same pinned image the compose stack runs, so the rules are
+      # checked by the promtool that will evaluate them.
+      - name: Check config and rules, run rule tests
+        run: |
+          image="$(sed -n 's/^ *image: \(prom\/prometheus:.*\)$/\1/p' observability/docker-compose.yml)"
+          docker run --rm -v "$PWD/observability/prometheus:/p:ro" -w /p --entrypoint promtool \
+            "$image" check config prometheus.yml
+          docker run --rm -v "$PWD/observability/prometheus:/p:ro" -w /p --entrypoint promtool \
+            "$image" test rules rules.test.yml
+
+      - name: Check the compose file and the dashboard JSON
+        run: |
+          docker compose -f observability/docker-compose.yml config --quiet
+          python3 -m json.tool observability/grafana/dashboards/shim.json > /dev/null

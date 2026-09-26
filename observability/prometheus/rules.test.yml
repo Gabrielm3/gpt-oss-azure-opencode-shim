@@ -1,0 +1,123 @@
+# promtool test rules observability/prometheus/rules.test.yml
+# Series use the names the shim exports, so a rename breaks this test.
+rule_files:
+  - rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: fast burn pages, healthy traffic stays quiet
+    interval: 1m
+    input_series:
+      - series: 'shim_requests_total{outcome="passthrough"}'
+        values: "0+100x120"
+      - series: 'shim_requests_total{outcome="upstream_error"}'
+        values: "0+0x30 0+20x90"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ShimErrorBudgetFastBurn
+        exp_alerts: []
+      - eval_time: 115m
+        alertname: ShimErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: 'Shim is burning its error budget 14x too fast'
+              description: '16.67% of requests failed over 1h (SLO allows 1%). Check azure-shim.service logs and `az login`.'
+    promql_expr_test:
+      - expr: shim:slo_errors:ratio_rate5m
+        eval_time: 115m
+        exp_samples:
+          - labels: "shim:slo_errors:ratio_rate5m"
+            value: 0.16666666666666666
+
+  - name: stalled forced turns
+    interval: 1m
+    input_series:
+      - series: 'shim_requests_total{outcome="native"}'
+        values: "0+7x120"
+      - series: 'shim_requests_total{outcome="failed"}'
+        values: "0+3x120"
+      - series: 'shim_requests_total{outcome="rescued"}'
+        values: "0+0x120"
+      - series: 'shim_requests_total{outcome="empty_choices"}'
+        values: "0+0x120"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: ShimStalledTurnsHigh
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: 'Forced tool calls stall more than usual'
+              description: '30% of forced requests got no tool call in the last hour. Run the live eval to check for model drift.'
+
+  - name: slow forced requests and slow first tokens
+    interval: 1m
+    input_series:
+      - series: 'shim_forced_request_duration_seconds_bucket{outcome="native",le="60"}'
+        values: "0+0x60"
+      - series: 'shim_forced_request_duration_seconds_bucket{outcome="native",le="120"}'
+        values: "0+1x60"
+      - series: 'shim_forced_request_duration_seconds_bucket{outcome="native",le="+Inf"}'
+        values: "0+1x60"
+      - series: 'shim_time_to_first_token_seconds_bucket{model="gpt-oss-120b",le="10"}'
+        values: "0+0x60"
+      - series: 'shim_time_to_first_token_seconds_bucket{model="gpt-oss-120b",le="20"}'
+        values: "0+1x60"
+      - series: 'shim_time_to_first_token_seconds_bucket{model="gpt-oss-120b",le="+Inf"}'
+        values: "0+1x60"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: ShimForcedLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: 'p95 latency of forced requests above 60 s'
+              description: 'p95 is 1m 57s over 30 min.'
+      - eval_time: 50m
+        alertname: ShimTimeToFirstTokenHigh
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: 'p95 time to first token above 10 s'
+              description: 'p95 TTFT is 19.5s over 30 min.'
+
+  - name: cost, missing usage and scrape failures
+    interval: 1m
+    input_series:
+      - series: 'shim_cost_usd_total{model="gpt-oss-120b"}'
+        values: "0+0.002x1500"
+      - series: 'shim_usage_missing_total{model="gpt-oss-120b"}'
+        values: "0 0 1 1"
+      - series: 'up{job="shim"}'
+        values: "1 1 0 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 1441m
+        alertname: ShimDailyCostHigh
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: 'Estimated spend above USD 1 in 24 h'
+              description: 'Estimated 2.88 USD in the last 24 h (list price).'
+      - eval_time: 3m
+        alertname: ShimUsageMissing
+        exp_alerts:
+          - exp_labels:
+              severity: info
+            exp_annotations:
+              summary: 'Answers without token usage'
+              description: 'Token and cost metrics undercount; the upstream stopped reporting usage.'
+      - eval_time: 9m
+        alertname: ShimDown
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              job: shim
+            exp_annotations:
+              summary: 'Prometheus cannot scrape the shim'
+              description: 'azure-shim.service is down or not answering /metrics.'
