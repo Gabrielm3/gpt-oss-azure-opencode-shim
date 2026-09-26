@@ -104,7 +104,8 @@ model. A third table adds tokens and the list-price cost per request and per
 strict success. The `direct` target uses the API key when it is set and an
 Entra ID token otherwise.
 
-2026-09-25, 15 scenarios × 4 per arm (240 requests, about USD 0.05):
+2026-09-25, 15 scenarios × 4 per arm (240 requests, about USD 0.04 at list
+price). Raw records: `evals/results/2026-09-25-model-comparison.json`.
 
 | Arm | Strict success | Stalled | Args correct | p50 / p95 s | USD / 1k successes |
 | --- | -------------- | ------- | ------------ | ----------- | ------------------ |
@@ -120,12 +121,15 @@ What it shows:
   faster at p50 than gpt-5-mini. Without the shim it cannot answer a forced
   call at all.
 - **gpt-5-mini never stalls when called directly**, because it supports forced
-  `tool_choice` natively. Its strict misses are all a different, valid tool
-  (`read` before `StructuredOutput`), so progress is 60/60.
-- **The shim makes gpt-5-mini worse**: stalls go from 0/60 to 4/60, because
-  the rewrite to `"auto"` removes a constraint the model honors. The rewrite
-  should apply only to models that need it (the gpt-oss family). That is the
-  next change to the shim.
+  `tool_choice` natively. Its strict misses all call a different offered tool
+  with valid arguments (`read`, `glob`, `bash`), so progress is 60/60.
+- **The shim likely makes gpt-5-mini worse.** Stalls go from 0/60 direct to
+  4/60 through the shim. The mechanism is clear: the rewrite to `"auto"`
+  removes a constraint the model honors. But the 95% interval of the
+  difference (−1 to +16 points) still includes zero, so this is a strong
+  hypothesis, not a result yet. A gpt-5-mini-only rerun with more repeats
+  settles it. The proposed change is to apply the rewrite only to models that
+  need it (the gpt-oss family).
 - The intervals overlap for success, so "gpt-oss-120b is more accurate" is
   not proven at n=60. The cost and latency gaps are far outside the noise.
 
