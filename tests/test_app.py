@@ -63,7 +63,7 @@ async def test_forward_rewrites_forced_tool_choice(shim_client) -> None:
         await client.post(
             "/v1/chat/completions",
             json={
-                "model": "m",
+                "model": "gpt-oss-120b",
                 "messages": [],
                 "tool_choice": {"type": "function", "function": {"name": "x"}},
             },
