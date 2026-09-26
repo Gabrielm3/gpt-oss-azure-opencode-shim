@@ -1,6 +1,6 @@
 # gpt-oss-azure-opencode-shim
 
-> A small local HTTP shim for **Azure-hosted GPT-OSS models**. It rewrites the forced `tool_choice` values that Azure AI Foundry rejects, turns answers that miss the required tool call back into that tool call, reports what it did on every request, and keeps the API key out of the client configuration.
+> A local HTTP shim for **Azure-hosted GPT-OSS models**. It rewrites the forced `tool_choice` values that Azure AI Foundry rejects, turns answers that miss the required tool call back into that tool call, reports what it did on every request, and keeps the API key out of the client configuration.
 
 [![PyPI](https://img.shields.io/pypi/v/gpt-oss-azure-opencode-shim.svg)](https://pypi.org/project/gpt-oss-azure-opencode-shim/)
 [![CI](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/actions/workflows/ci.yml/badge.svg)](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/actions/workflows/ci.yml)
@@ -260,11 +260,23 @@ shim_forced_request_duration_seconds_count{outcome="rescued"} 13.0
 
 `shim_forced_request_duration_seconds` is the time a forced request waits before its first byte, because the shim buffers it. In `observe` mode, `shim_polyfill_observed_total{outcome}` counts what the repair would have done while every answer stays unchanged (`x-shim-outcome: rewritten`). `native_rate = native / forced` also shows when Azure starts supporting forced tool choice, which is when the polyfill stops being needed.
 
+**Tokens, cost and streaming latency.** Every chat answer with HTTP 200 is metered, on every path (plain, streamed, forced and buffered, observe):
+
+| Metric | Meaning |
+| ------ | ------- |
+| `shim_tokens_total{model,type}` | Tokens Azure reported; `type` is `input` or `output` (output includes reasoning) |
+| `shim_cost_usd_total{model}` | Estimated cost: tokens × list price (`SHIM_PRICES`) |
+| `shim_usage_missing_total{model}` | Answers that reported no usage, so an undercount is visible |
+| `shim_time_to_first_token_seconds{model}` | Passthrough streams: request start to the first reasoning, content or tool-call token |
+| `shim_output_tokens_per_second{model}` | Passthrough streams: output tokens from first token to end of stream |
+
+Azure sends `usage` at the end of a stream without `stream_options`, so the shim never changes the request to get it. Tokens are counted even when the client gets a 502 for `choices: []`, because Azure still bills them. Forced requests are buffered, so they have no separate first-token time: `shim_forced_request_duration_seconds` is their latency. The `model` label is the requested model name, capped at 16 values (`other` after that). The cost is an estimate for trends and comparisons: it ignores discounts, cached-input pricing and currency, so the Azure bill remains the source of truth.
+
 ### 4. Credentials
 
 The client sends a placeholder key. The shim sends the real key as both `api-key` and `Authorization: Bearer` (Azure accepts either). The key lives only in the shim's environment file, which the Quick Start and `install.sh` create with mode `600`.
 
-**Keyless (Entra ID).** Leave `AZURE_FOUNDRY_API_KEY` unset and install the `[entra]` extra (`uv tool install 'gpt-oss-azure-opencode-shim[entra]'`). The shim then sends an Entra ID bearer token from `DefaultAzureCredential`: an `az login` session, a managed identity, or workload identity federation in CI. Tokens are cached and refreshed 5 minutes before they expire. Your identity needs a data-plane role on the resource, such as `Cognitive Services OpenAI User` or `Azure AI User`. If no token can be obtained (for example, an expired `az login`), the request fails with HTTP 502 `upstream_auth_error`, is counted as `upstream_error` in `/metrics`, and the cause is logged. With Entra ID, the resource can run with key auth disabled (`disableLocalAuth`).
+**Keyless (Entra ID).** Leave `AZURE_FOUNDRY_API_KEY` unset and install the `[entra]` extra (`uv tool install 'gpt-oss-azure-opencode-shim[entra]'`). The shim then sends an Entra ID bearer token from `DefaultAzureCredential`: an `az login` session, a managed identity, or workload identity federation in CI. Tokens are cached and refreshed 5 minutes before they expire. Your identity needs a data-plane role on the resource, such as `Cognitive Services OpenAI User` or `Foundry User`. If no token can be obtained (for example, an expired `az login`), the request fails with HTTP 502 `upstream_auth_error`, is counted as `upstream_error` in `/metrics`, and the cause is logged. With Entra ID, the resource can run with key auth disabled (`disableLocalAuth`).
 
 ### 5. Header hygiene
 
@@ -314,7 +326,7 @@ With `SHIM_TRACE_DIR` set, the shim also appends one small line per chat request
 gpt-oss-azure-opencode-shim-report ~/.local/share/gpt-oss-azure-opencode-shim/traces --days 7
 ```
 
-The report shows the share of forced requests and the native, rescued, failed and stalled rates with 95% Wilson intervals. It counts only forced requests that got HTTP 200; upstream errors are listed apart.
+The report shows the share of forced requests and the native, rescued, failed and stalled rates with 95% Wilson intervals. It counts only forced requests that got HTTP 200; upstream errors are listed apart. A second table sums input and output tokens and the estimated cost per UTC day.
 
 Promote one into a regression fixture:
 
@@ -330,6 +342,29 @@ python -m evals.fixtures promote TRACES.jsonl --line 41 --id reasoning-leak \
 The fixtures in `tests/fixtures/polyfill/` were recorded this way from `gpt-oss-120b` and cover both rescued shapes, the three shapes left unchanged (including a leaked call whose JSON is truncated, where completing it would mean inventing arguments) and two native tool calls.
 
 ---
+
+### Dashboard, SLOs and alerts
+
+`observability/` holds a local Prometheus and Grafana stack, with the dashboard, recording rules and alerts versioned as code:
+
+```bash
+docker compose -f observability/docker-compose.yml up -d
+# Grafana: http://127.0.0.1:3000 (dashboard "gpt-oss shim")   Prometheus: http://127.0.0.1:9090/alerts
+```
+
+Both containers use the host network and listen on 127.0.0.1, because the shim accepts only local `Host` headers. The images are pinned by digest and updated by Dependabot.
+
+| Alert | Fires when |
+| ----- | ---------- |
+| `ShimErrorBudgetFastBurn` (page) | SLO: 99% of requests end without `upstream_error` or `empty_choices`. Burn rate above 14.4× over 1 h and 5 min |
+| `ShimErrorBudgetSlowBurn` (ticket) | Burn rate above 6× over 6 h and 30 min |
+| `ShimStalledTurnsHigh` | More than 15% of forced requests get no tool call in 1 h (with at least 20 requests); the eval baseline is about 7% |
+| `ShimForcedLatencyHigh`, `ShimTimeToFirstTokenHigh` | p95 above 60 s (forced) or 10 s (first token), sustained for 15 min |
+| `ShimDailyCostHigh` | Estimated spend above USD 1 in 24 h |
+| `ShimUsageMissing` | Answers stop reporting token usage |
+| `ShimDown` | Prometheus cannot scrape `/metrics` for 5 min |
+
+The burn-rate pairs follow the multiwindow pattern from the Google SRE workbook. `observability/prometheus/rules.test.yml` runs every alert against synthetic series with `promtool test rules` in CI. The tests use the exact metric names the shim exports, so a rename fails the build. The stack has no Alertmanager: alerts show up on the Prometheus alerts page. To route them, add an Alertmanager with your receiver.
 
 ## Evaluation
 
@@ -405,6 +440,7 @@ Do not expose the shim on a network interface. The `Host` check does not stop a 
 | `SHIM_CONNECT_TIMEOUT`  | no       | `10`        | Seconds to open a connection to Azure                |
 | `SHIM_READ_TIMEOUT`     | no       | `600`       | Maximum seconds between bytes received from Azure    |
 | `SHIM_TOOL_POLYFILL`    | no       | `on`        | `on`, `observe` or `off` (see Tool-call polyfill)    |
+| `SHIM_PRICES`           | no       | built in    | `model=input/output` USD per 1M tokens, comma-separated |
 | `SHIM_TRACE_DIR`        | no       | —           | Directory for traces of forced requests              |
 | `SHIM_TRACE_OUTCOMES`   | no       | `rescued,failed,empty_choices` | Outcomes worth tracing            |
 | `SHIM_TRACE_MAX_MB`     | no       | `100`       | Size cap for the trace directory                     |

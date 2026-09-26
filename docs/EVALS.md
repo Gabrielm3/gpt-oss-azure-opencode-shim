@@ -107,15 +107,16 @@ precision needs pooled nights before it says anything.
 ## Cost and safety
 
 - **Cost:** one run is 60 requests with at most 2,048 output tokens each.
-  `timeout-minutes` and a single-run `concurrency` group bound it. There is
-  no Azure budget alert yet; that belongs to the planned infrastructure code.
-- **Secrets:** the Azure key and URL live on the `live-eval` GitHub
-  environment, which only `master` can use. The workflow never runs on
-  `pull_request`, so code from a fork can never reach them. The shim's own log,
-  which may contain upstream error text, is not uploaded. This is still a
-  stored, long-lived key. The plan is to replace it with GitHub OIDC and an
-  Entra ID federated credential, the same no-stored-secret pattern the PyPI
-  release already uses.
+  `timeout-minutes` and a single-run `concurrency` group bound it. A yearly
+  Azure budget (`infra/budget.tf`) emails the subscription Owner at 20%, 50%,
+  80% and 100% of actual spend.
+- **Credentials:** none stored. The job logs in the `id-azure-shim-eval`
+  managed identity through GitHub OIDC (a federated credential for the
+  `live-eval` environment, which only `master` can use), and the shim gets
+  Entra ID tokens from that session. The identity holds only `Cognitive
+  Services OpenAI User` on the account. The workflow never runs on
+  `pull_request`, so code from a fork can never reach it. The shim's own log,
+  which may contain upstream error text, is not uploaded.
 - **Scheduled workflows** are disabled by GitHub after 60 days without
   repository activity. Re-enable it from the Actions tab.
 

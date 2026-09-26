@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from .polyfill import Outcome, PolyfillMode
+from .usage import Usage
 
 logger = logging.getLogger("gpt_oss_shim")
 
@@ -105,10 +106,12 @@ class TraceWriter:
         status: int,
         seconds: float,
         model: Any,
+        usage: Usage | None = None,
+        cost_usd: float | None = None,
     ) -> None:
         """Record what happened to one chat request, without any content."""
         now = self._now()
-        record = {
+        record: dict[str, Any] = {
             "ts": now.isoformat(timespec="seconds"),
             "outcome": outcome.value,
             "mode": mode.value,
@@ -118,6 +121,11 @@ class TraceWriter:
             "seconds": round(seconds, 3),
             "model": model,
         }
+        if usage is not None:
+            record["input_tokens"] = usage.input_tokens
+            record["output_tokens"] = usage.output_tokens
+        if cost_usd is not None:
+            record["cost_usd"] = round(cost_usd, 8)
         self._append("outcomes", now, record, capped=False)
 
     def _append(self, kind: str, now: datetime, record: dict[str, Any], *, capped: bool) -> None:

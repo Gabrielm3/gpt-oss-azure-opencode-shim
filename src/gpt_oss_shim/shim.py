@@ -62,6 +62,9 @@ SHIM_TRACE_MAX_MB, SHIM_TRACE_RETENTION_DAYS
 OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_TRACES_EXPORTER
     Standard OpenTelemetry variables. Tracing is on when an endpoint is set,
     or with ``OTEL_TRACES_EXPORTER=console``. Needs the ``otel`` extra.
+SHIM_PRICES
+    List prices for the cost estimate, ``model=input/output`` in USD per 1M
+    tokens, comma-separated. Overrides the defaults in ``usage.py``.
 SHIM_TOOL_POLYFILL
     ``on`` (default): repair answers to forced requests into the tool call.
     ``observe``: leave answers unchanged and only count what a repair would do
@@ -112,6 +115,7 @@ from .traces import (
     DEFAULT_TRACE_OUTCOMES,
     TraceWriter,
 )
+from .usage import PriceTable, SseMeter, Usage, usage_from_summary
 
 __version__ = version("gpt-oss-azure-opencode-shim")
 
@@ -188,6 +192,7 @@ def _load_config() -> dict[str, Any]:
         "connect_timeout": _env_number("SHIM_CONNECT_TIMEOUT", _DEFAULT_CONNECT_TIMEOUT),
         "read_timeout": _env_number("SHIM_READ_TIMEOUT", _DEFAULT_READ_TIMEOUT),
         "tool_polyfill": _env_polyfill_mode("SHIM_TOOL_POLYFILL"),
+        "prices": PriceTable.from_env("SHIM_PRICES"),
         "trace_dir": _env_path("SHIM_TRACE_DIR"),
         "trace_outcomes": _env_outcomes("SHIM_TRACE_OUTCOMES", DEFAULT_TRACE_OUTCOMES),
         "trace_max_bytes": int(_env_number("SHIM_TRACE_MAX_MB", DEFAULT_MAX_BYTES / _MIB) * _MIB),
@@ -442,7 +447,8 @@ def create_app(
         openapi_url=None,
         lifespan=lifespan,
     )
-    metrics = Metrics()
+    prices = config.get("prices") or PriceTable.from_env("SHIM_PRICES")
+    metrics = Metrics(prices)
     tracing = Tracing(tracer)
     app.state.http_client = client
     app.state.metrics = metrics
@@ -532,19 +538,36 @@ def create_app(
                 model=payload.get("model"), forced=forced is not None, mode=mode
             )
 
-        def done(response: Response, outcome: Outcome, *args: Any, **kwargs: Any) -> Response:
-            """``finish`` plus one outcome-log line per chat request."""
+        model = payload.get("model")
+
+        def log_chat(outcome: Outcome, status: int, usage: Usage | None = None) -> None:
+            """One outcome-log line per chat request."""
+            if not is_chat or traces is None:
+                return
+            traces.log_outcome(
+                outcome=outcome,
+                mode=mode,
+                forced=forced_tool_choice(payload) is not None,
+                stream=bool(payload.get("stream")),
+                status=status,
+                seconds=time.perf_counter() - started,
+                model=model,
+                usage=usage,
+                cost_usd=prices.cost(model, usage) if usage and isinstance(model, str) else None,
+            )
+
+        def done(
+            response: Response,
+            outcome: Outcome,
+            *args: Any,
+            usage: Usage | None = None,
+            log: bool = True,
+            **kwargs: Any,
+        ) -> Response:
+            """``finish`` plus the outcome-log line, unless a stream logs it at its end."""
             response = finish(response, outcome, *args, **kwargs)
-            if is_chat and traces is not None:
-                traces.log_outcome(
-                    outcome=outcome,
-                    mode=mode,
-                    forced=forced_tool_choice(payload) is not None,
-                    stream=bool(payload.get("stream")),
-                    status=response.status_code,
-                    seconds=time.perf_counter() - started,
-                    model=payload.get("model"),
-                )
+            if log:
+                log_chat(outcome, response.status_code, usage)
             return response
 
         forward_headers = {
@@ -581,6 +604,7 @@ def create_app(
         if is_sse and (forced is None or observing):
             on_complete = None
             streamed: dict[str, Any] = {}
+            meter = SseMeter(started)
             if observing and forced is not None:
                 observed_forced, observed_payload = forced, payload
 
@@ -589,19 +613,33 @@ def create_app(
                     streamed["summary"] = response_summary(body, is_sse=True)
 
             def on_close() -> None:
-                # The span covers the whole stream, so it ends with it.
+                # The span and the usage cover the whole stream, so they end with it.
+                meter.close()
                 span.finish(
                     default_outcome,
                     status_code=upstream_response.status_code,
                     summary=streamed.get("summary"),
                 )
+                if is_chat and ok:
+                    metrics.record_usage(model, meter.usage)
+                    metrics.record_stream_timing(
+                        model,
+                        ttft=meter.time_to_first_token,
+                        tokens_per_second=meter.output_tokens_per_second(time.perf_counter()),
+                    )
+                log_chat(default_outcome, upstream_response.status_code, meter.usage)
 
             streaming = StreamingResponse(
-                relay_sse(upstream_response, on_complete=on_complete, on_close=on_close),
+                relay_sse(
+                    upstream_response,
+                    on_chunk=meter.feed,
+                    on_complete=on_complete,
+                    on_close=on_close,
+                ),
                 status_code=upstream_response.status_code,
                 headers=headers,
             )
-            return done(streaming, default_outcome)
+            return done(streaming, default_outcome, log=False)
 
         try:
             content = await upstream_response.aread()
@@ -611,6 +649,10 @@ def create_app(
             await upstream_response.aclose()
 
         summary = response_summary(content, is_sse=is_sse) if is_chat else None
+        usage = usage_from_summary(summary)
+        if is_chat and ok:
+            # Billed whenever Azure answered, even if the client gets a 502 below.
+            metrics.record_usage(model, usage)
 
         if observing and forced is not None:
             span.set_observed(observe(content, forced, payload, is_sse=False))
@@ -625,15 +667,24 @@ def create_app(
             logger.info("forced tool_choice outcome=%s seconds=%.2f", outcome.value, elapsed)
             if outcome is Outcome.EMPTY_CHOICES and not is_sse:
                 return done(
-                    empty_choices_response(headers), outcome, elapsed, span=span, summary=summary
+                    empty_choices_response(headers),
+                    outcome,
+                    elapsed,
+                    span=span,
+                    summary=summary,
+                    usage=usage,
                 )
             response = Response(content=content, status_code=200, headers=headers)
-            return done(response, outcome, elapsed, span=span, summary=summary)
+            return done(response, outcome, elapsed, span=span, summary=summary, usage=usage)
 
         if is_chat and ok and not is_sse and _is_empty_completion(content):
             logger.error("upstream returned HTTP 200 with no choices")
             return done(
-                empty_choices_response(headers), Outcome.EMPTY_CHOICES, span=span, summary=summary
+                empty_choices_response(headers),
+                Outcome.EMPTY_CHOICES,
+                span=span,
+                summary=summary,
+                usage=usage,
             )
 
         response = Response(
@@ -642,7 +693,7 @@ def create_app(
             headers=headers,
             media_type="application/json",  # used only if upstream sent no content-type
         )
-        return done(response, default_outcome, span=span, summary=summary)
+        return done(response, default_outcome, span=span, summary=summary, usage=usage)
 
     return app
 
@@ -727,6 +778,7 @@ def forwardable_response_headers(headers: httpx.Headers) -> dict[str, str]:
 async def relay_sse(
     response: httpx.Response,
     *,
+    on_chunk: Callable[[bytes], None] | None = None,
     on_complete: Callable[[bytes], None] | None = None,
     on_close: Callable[[], None] | None = None,
 ) -> AsyncIterator[bytes]:
@@ -737,6 +789,7 @@ async def relay_sse(
     OpenAI SDK, the AI SDK used by OpenCode) surface a ``data: {"error": ...}``
     event as an error instead of treating the truncated stream as complete.
 
+    ``on_chunk`` sees every chunk as it passes, for metering; it must not raise.
     ``on_complete`` receives a copy of the whole body once the stream ends
     normally. It is not called for a broken stream. ``on_close`` always runs
     when the relay ends, however it ended.
@@ -744,6 +797,12 @@ async def relay_sse(
     copy: list[bytes] = []
     try:
         async for chunk in response.aiter_bytes():
+            if on_chunk is not None:
+                try:
+                    on_chunk(chunk)
+                except Exception:
+                    logger.exception("failed to meter a streamed chunk")
+                    on_chunk = None
             if on_complete is not None:
                 copy.append(chunk)
             yield chunk
