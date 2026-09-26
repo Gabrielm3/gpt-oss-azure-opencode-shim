@@ -35,7 +35,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from evals.tool_choice_eval import STALLED_REASONS
+from evals.tool_choice_eval import STALLED_REASONS, summarize_args
 from gpt_oss_shim.stats import difference_interval, format_rate
 
 # Below this share of answered requests, upstream errors dominate the run.
@@ -106,6 +106,12 @@ def evaluate(records: list[dict[str, Any]], baseline: dict[str, Any], *, target:
         )
     else:
         lines.append("**Pass**: stalled turns are within sampling noise of the baseline.")
+    lines += [
+        "",
+        "### Argument values (reported, not gated)",
+        "",
+        summarize_args(rows),
+    ]
     lines.append(f"\nBaseline: {baseline['source']}")
     return GateResult(Verdict.DRIFT if drift else Verdict.PASS, "\n".join(lines))
 

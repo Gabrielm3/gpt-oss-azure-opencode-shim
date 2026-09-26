@@ -9,6 +9,11 @@ schema-valid call to an intermediate tool (``read`` before the final
 fails. The report shows both rates and the stalled turns with 95% Wilson
 intervals, the ``x-shim-outcome`` values seen, and latency per target.
 
+A second table scores the argument values of successful calls against the
+scenario's golden arguments (``evals/golden.py``), overall and split by
+``x-shim-outcome``. The ``rescued`` row is the polyfill's precision: how often
+a call it built from text carried the right values.
+
 Usage::
 
     python -m evals.tool_choice_eval \\
@@ -34,6 +39,7 @@ from typing import Any
 import httpx
 from jsonschema.validators import validator_for
 
+from evals.golden import args_correct
 from evals.scenarios import SCENARIOS
 from gpt_oss_shim.stats import format_rate, percentile
 
@@ -90,6 +96,14 @@ def score(scenario: dict[str, Any], status: int, body: bytes, *, stream: bool) -
     return True, "ok"
 
 
+def golden(scenario: dict[str, Any], status: int, body: bytes, *, stream: bool) -> bool | None:
+    """Golden-argument verdict for a strict success, else ``None`` (not scored)."""
+    if not scenario.get("expect_args") or score(scenario, status, body, stream=stream)[0] is False:
+        return None
+    calls = extract_tool_calls(body, stream=stream) or []
+    return args_correct(scenario["expect_args"], calls[0][1])
+
+
 def progress(scenario: dict[str, Any], status: int, body: bytes, *, stream: bool) -> bool:
     """Return ``True`` when the first tool call is any offered tool with valid arguments."""
     ok, _ = score({**scenario, "expect_tool": None}, status, body, stream=stream)
@@ -129,6 +143,7 @@ def run_once(
         "stream": stream,
         "ok": ok,
         "progress": bool(status) and progress(scenario, status, body, stream=stream),
+        "args": golden(scenario, status, body, stream=stream) if status else None,
         "reason": reason,
         "outcome": outcome,
         "seconds": round(seconds, 3),
@@ -172,6 +187,31 @@ def summarize(records: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def summarize_args(records: list[dict[str, Any]]) -> str:
+    """Render golden-argument accuracy per target, overall and by outcome.
+
+    Only strict successes on scenarios with golden arguments are scored.
+    """
+    scored = [r for r in records if r.get("args") is not None]
+    if not scored:
+        return "No golden-argument results."
+    lines = [
+        "| Target | Arguments correct | native | rescued |",
+        "| ------ | ----------------- | ------ | ------- |",
+    ]
+    for target in dict.fromkeys(r["target"] for r in scored):
+        rows = [r for r in scored if r["target"] == target]
+        cells = [_args_rate(rows)]
+        for outcome in ("native", "rescued"):
+            cells.append(_args_rate([r for r in rows if r["outcome"] == outcome]))
+        lines.append(f"| {target} | " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def _args_rate(rows: list[dict[str, Any]]) -> str:
+    return format_rate(sum(r["args"] for r in rows), len(rows)) if rows else "—"
+
+
 def _counts(counter: Counter) -> str:
     return ", ".join(f"{k} {v}" for k, v in counter.most_common()) or "—"
 
@@ -203,6 +243,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         with open(args.out, "w") as fh:
             json.dump(records, fh, indent=2)
     print(summarize(records))
+    print()
+    print(summarize_args(records))
     return 0
 
 
