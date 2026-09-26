@@ -7,7 +7,10 @@ recorded Azure behavior behind each fix.
 1. Forced ``tool_choice``. Azure answers a forced function with HTTP 200 and
    ``choices: []`` (or an in-band error event when streaming), and answers
    ``"required"`` with HTTP 400 ``UnsupportedToolUse``. The shim rewrites any
-   value other than ``"auto"``/``"none"`` to ``"auto"``.
+   value other than ``"auto"``/``"none"`` to ``"auto"``, only for models in
+   ``SHIM_REWRITE_MODELS`` (default ``gpt-oss*``). Models that honor forced
+   tool calls, such as gpt-5-mini, stall more often when rewritten, so their
+   requests pass through unchanged (see ``docs/EVALS.md``).
 
 2. Credentials. The client sends a placeholder key; the shim sends the real
    key as ``api-key`` and ``Authorization: Bearer``, or, with no key set, an
@@ -62,6 +65,10 @@ SHIM_TRACE_MAX_MB, SHIM_TRACE_RETENTION_DAYS
 OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_TRACES_EXPORTER
     Standard OpenTelemetry variables. Tracing is on when an endpoint is set,
     or with ``OTEL_TRACES_EXPORTER=console``. Needs the ``otel`` extra.
+SHIM_REWRITE_MODELS
+    Comma-separated model name patterns (``fnmatch``, case-insensitive) whose
+    forced ``tool_choice`` is rewritten and polyfilled (default ``gpt-oss*``;
+    ``*`` for every model). Requests without a model are rewritten.
 SHIM_PRICES
     List prices for the cost estimate, ``model=input/output`` in USD per 1M
     tokens, comma-separated. Overrides the defaults in ``usage.py``.
@@ -74,6 +81,7 @@ SHIM_TOOL_POLYFILL
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import ipaddress
 import json
 import logging
@@ -192,6 +200,7 @@ def _load_config() -> dict[str, Any]:
         "connect_timeout": _env_number("SHIM_CONNECT_TIMEOUT", _DEFAULT_CONNECT_TIMEOUT),
         "read_timeout": _env_number("SHIM_READ_TIMEOUT", _DEFAULT_READ_TIMEOUT),
         "tool_polyfill": _env_polyfill_mode("SHIM_TOOL_POLYFILL"),
+        "rewrite_models": _env_patterns("SHIM_REWRITE_MODELS", DEFAULT_REWRITE_MODELS),
         "prices": PriceTable.from_env("SHIM_PRICES"),
         "trace_dir": _env_path("SHIM_TRACE_DIR"),
         "trace_outcomes": _env_outcomes("SHIM_TRACE_OUTCOMES", DEFAULT_TRACE_OUTCOMES),
@@ -234,6 +243,28 @@ def _env_outcomes(name: str, default: frozenset[Outcome]) -> frozenset[Outcome]:
 
 _TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
 _FALSE_WORDS = frozenset({"0", "false", "no", "off"})
+
+
+# Models whose forced tool_choice Azure rejects or ignores (docs/PROBLEM.md).
+DEFAULT_REWRITE_MODELS = ("gpt-oss*",)
+
+
+def _env_patterns(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """Read comma-separated, lower-cased ``fnmatch`` patterns from the environment."""
+    raw = os.environ.get(name, "")
+    patterns = tuple(p.strip().lower() for p in raw.split(",") if p.strip())
+    return patterns or default
+
+
+def rewrites_model(model: object, patterns: Sequence[str]) -> bool:
+    """Whether the shim rewrites and polyfills forced tool calls for ``model``.
+
+    A request without a usable model name is rewritten, as before scoping.
+    """
+    if not isinstance(model, str) or not model:
+        return True
+    name = model.lower()
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
 
 
 def _env_polyfill_mode(name: str) -> PolyfillMode:
@@ -459,6 +490,7 @@ def create_app(
 
     upstream = config["upstream"]
     mode = PolyfillMode(config.get("tool_polyfill", PolyfillMode.ON))
+    rewrite_models = tuple(config.get("rewrite_models", DEFAULT_REWRITE_MODELS))
     trace_dir = config.get("trace_dir")
     traces = (
         TraceWriter(
@@ -525,11 +557,15 @@ def create_app(
         default_outcome = Outcome.PASSTHROUGH
         span = NO_SPAN
 
+        in_scope = False
         if is_chat:
             payload = _json_object(body) or {}
-            if mode is not PolyfillMode.OFF:
+            in_scope = rewrites_model(payload.get("model"), rewrite_models)
+            if in_scope and mode is not PolyfillMode.OFF:
                 forced = forced_tool_choice(payload)
-            body, notes = sanitize_chat_body(body)
+            notes: list[str] = []
+            if in_scope:
+                body, notes = sanitize_chat_body(body)
             for note in notes:
                 logger.info("sanitized request: %s", note)
             if notes:
@@ -547,7 +583,7 @@ def create_app(
             traces.log_outcome(
                 outcome=outcome,
                 mode=mode,
-                forced=forced_tool_choice(payload) is not None,
+                forced=in_scope and forced_tool_choice(payload) is not None,
                 stream=bool(payload.get("stream")),
                 status=status,
                 seconds=time.perf_counter() - started,

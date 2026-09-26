@@ -131,6 +131,12 @@ What it shows:
   vs 7/120 through the shim, difference +1.5 to +11.6 points (95% CI)**. Strict
   success moves the same way (98/120 vs 92/120, within noise). The rewrite
   should apply only to models that need it (the gpt-oss family).
+- **Fixed by scoping the rewrite** (`SHIM_REWRITE_MODELS`, default
+  `gpt-oss*`). Same eval, 15 × 8 per model through the scoped shim
+  (`evals/results/2026-09-26-scoped-rewrite.json`): gpt-5-mini **0/120
+  stalled**, all `passthrough`, strict success 100/120, matching direct.
+  gpt-oss-120b is unchanged: 8/120 stalled, 106/120 strict success, with
+  native and rescued calls as before.
 - The intervals overlap for success, so "gpt-oss-120b is more accurate" is
   not proven at n=60. The cost and latency gaps are far outside the noise.
 
