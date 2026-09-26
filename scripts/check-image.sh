@@ -49,6 +49,18 @@ done
 [ "$health" = healthy ] || { echo "container health: $health" >&2; docker logs "$name" >&2; exit 1; }
 echo "health $health"
 
+echo "== Entra ID mode starts without a key"
+docker rm -f "$name" >/dev/null
+docker run -d --name "$name" --read-only --cap-drop ALL --security-opt no-new-privileges \
+    -p "127.0.0.1:$port:9526" -e UPSTREAM_URL=https://upstream.invalid/openai \
+    "$image" >/dev/null
+for _ in $(seq 1 30); do
+    curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 && break
+    sleep 1
+done
+curl -fsS "http://127.0.0.1:$port/healthz" || { docker logs "$name" >&2; exit 1; }
+echo
+
 echo "== Host check"
 status="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: attacker.example' "http://127.0.0.1:$port/healthz")"
 [ "$status" = 403 ] || { echo "foreign Host header got HTTP $status, want 403" >&2; exit 1; }
