@@ -8,14 +8,18 @@ Two modes:
   ``DefaultAzureCredential``, e.g. an ``az login`` session or a managed
   identity. Needs the ``entra`` extra. Tokens are cached and refreshed shortly
   before they expire, because getting one can spawn ``az`` and take a second.
+  If that early refresh fails, the current token is used until it expires.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from typing import Any, Protocol
+
+logger = logging.getLogger("gpt_oss_shim")
 
 # Token audience for Azure AI Services / Azure OpenAI data-plane calls.
 ENTRA_SCOPE = "https://cognitiveservices.azure.com/.default"
@@ -79,6 +83,10 @@ class EntraAuth:
                     # off the event loop.
                     access = await asyncio.to_thread(self._credential.get_token, self._scope)
                 except Exception as exc:
+                    if self._token is not None and self._clock() < self._expires_on:
+                        # Early refresh failed; the current token still works.
+                        logger.warning("token refresh failed, reusing the current token: %s", exc)
+                        return self._token
                     raise UpstreamAuthError(f"{type(exc).__name__}: {exc}") from exc
                 self._token = access.token
                 self._expires_on = float(access.expires_on)
