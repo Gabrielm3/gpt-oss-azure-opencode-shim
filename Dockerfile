@@ -12,13 +12,13 @@
 # -dev variant of the same image, so both stages share one Python (3.14,
 # covered by the CI matrix). Digests are pinned; Dependabot keeps them current.
 
-FROM cgr.dev/chainguard/python:latest-dev@sha256:e55c66e1405ff03cf60c56c8c11bba46a272796ace158cd913dad5998caaf58a AS build
+FROM cgr.dev/chainguard/python:latest-dev@sha256:eb0d45dfc69fecb471d2eaee7a8eea281bf860578ef44cb85db1bfa8165c47fe AS build
 
 COPY dist/*.whl /tmp/dist/
 RUN python -m pip install --no-cache-dir --disable-pip-version-check \
         --target /tmp/shim "$(ls /tmp/dist/*.whl)[otel]"
 
-FROM cgr.dev/chainguard/python:latest@sha256:f23c2b7cd3d6b18aed6ad6e1099d79668ff62ba49078e81bb558e5a1c7581fd8
+FROM cgr.dev/chainguard/python:latest@sha256:565af762d7f3efedc4e60d7ac7815e41588211d3f5757be33d8303e915ee6c72
 
 COPY --from=build /tmp/shim /opt/shim
 
