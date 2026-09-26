@@ -12,8 +12,8 @@ resource "azurerm_cognitive_account" "foundry" {
   sku_name              = "S0"
   custom_subdomain_name = var.custom_subdomain_name
 
-  # The shim authenticates with an API key (AZURE_FOUNDRY_API_KEY).
-  local_auth_enabled            = true
+  # Entra ID only: API keys are rejected.
+  local_auth_enabled            = false
   public_network_access_enabled = true
   project_management_enabled    = true
 
