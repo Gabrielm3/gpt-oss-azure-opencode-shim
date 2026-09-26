@@ -2,7 +2,8 @@
 
 With ``SHIM_TRACE_DIR`` set, the shim appends one line per chat request to
 ``outcomes-YYYY-MM-DD.jsonl``: outcome, polyfill mode, whether the client
-forced a tool call, HTTP status and latency, never content. This report turns
+forced a tool call, HTTP status, latency, tokens and estimated cost, never
+content. This report turns
 the last N days of those lines into rates with 95% Wilson intervals, so the
 numbers survive restarts and do not need a Prometheus server.
 
@@ -86,6 +87,40 @@ def summarize_outcomes(records: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def summarize_usage(records: list[dict[str, Any]]) -> str:
+    """Render tokens and estimated cost per UTC day as Markdown."""
+    days: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        days.setdefault(str(record.get("ts", ""))[:10], []).append(record)
+    lines = [
+        "| Day (UTC) | Requests | With usage | Input tokens | Output tokens | Est. cost USD |",
+        "| --------- | -------- | ---------- | ------------ | ------------- | ------------- |",
+    ]
+    totals = [0, 0, 0, 0, 0.0]
+    for day in sorted(days):
+        rows = days[day]
+        metered = [r for r in rows if "input_tokens" in r]
+        row = [
+            len(rows),
+            len(metered),
+            sum(r["input_tokens"] for r in metered),
+            sum(r["output_tokens"] for r in metered),
+            sum(r.get("cost_usd", 0.0) for r in metered),
+        ]
+        totals = [a + b for a, b in zip(totals, row, strict=True)]
+        lines.append(_usage_row(day, row))
+    lines.append(_usage_row("**Total**", totals))
+    lines.append(
+        "\nCost is tokens × list price (SHIM_PRICES), an estimate; the Azure bill is authoritative."
+    )
+    return "\n".join(lines)
+
+
+def _usage_row(label: str, row: list[Any]) -> str:
+    requests, metered, tokens_in, tokens_out, cost = row
+    return f"| {label} | {requests} | {metered} | {tokens_in:,} | {tokens_out:,} | {cost:.4f} |"
+
+
 def _counts(counter: Counter[Any], sep: str = " ") -> str:
     return ", ".join(f"{k}{sep}{v}" for k, v in counter.most_common()) or "—"
 
@@ -118,6 +153,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(f"Window: {since} to {today} (UTC)\n")
     print(summarize_outcomes(records))
+    print()
+    print(summarize_usage(records))
     return 0
 
 

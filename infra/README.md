@@ -122,6 +122,8 @@ fails and opens (or comments on) an `infra-drift` issue.
   The identity cannot change Azure.
 - **No key access:** key auth is off (`local_auth_enabled = false`), so the
   provider skips `listKeys` and the custom role is read-only.
+- **Re-enabling keys:** Azure cannot regenerate keys while key auth is off.
+  After setting `local_auth_enabled = true`, regenerate both keys before use.
 - **No public logs:** Actions logs on a public repo are public, and a plan
   prints the subscription ID and the endpoint. The full plan goes to the
   private `drift-reports/<run id>/` container, which deletes reports after 90
