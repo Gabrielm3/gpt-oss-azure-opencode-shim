@@ -213,6 +213,8 @@ For `POST .../chat/completions`, any `tool_choice` other than `"auto"` or `"none
 INFO gpt_oss_shim: sanitized request: tool_choice='required' -> 'auto'
 ```
 
+The rewrite and the polyfill apply only to models that need them: names matching `SHIM_REWRITE_MODELS` (default `gpt-oss*`, case-insensitive). Other models on the same resource, such as gpt-5-mini, honor forced tool calls natively. Rewriting them made them stall: 7/120 through the shim vs 0/120 direct, a difference of +1.5 to +11.6 points (95% CI; see [Model comparison](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/docs/EVALS.md#model-comparison)). Their requests now pass through unchanged (`x-shim-outcome: passthrough`). If your gpt-oss deployment has a custom name, add it: `SHIM_REWRITE_MODELS=gpt-oss*,my-oss-deployment`. `*` rewrites every model.
+
 ### 2. Tool-call polyfill
 
 For a forced request, the shim buffers the answer (streamed or not) and inspects it:
@@ -440,6 +442,7 @@ Do not expose the shim on a network interface. The `Host` check does not stop a 
 | `SHIM_CONNECT_TIMEOUT`  | no       | `10`        | Seconds to open a connection to Azure                |
 | `SHIM_READ_TIMEOUT`     | no       | `600`       | Maximum seconds between bytes received from Azure    |
 | `SHIM_TOOL_POLYFILL`    | no       | `on`        | `on`, `observe` or `off` (see Tool-call polyfill)    |
+| `SHIM_REWRITE_MODELS`   | no       | `gpt-oss*`  | Model patterns whose forced `tool_choice` is rewritten |
 | `SHIM_PRICES`           | no       | built in    | `model=input/output` USD per 1M tokens, comma-separated |
 | `SHIM_TRACE_DIR`        | no       | —           | Directory for traces of forced requests              |
 | `SHIM_TRACE_OUTCOMES`   | no       | `rescued,failed,empty_choices` | Outcomes worth tracing            |
