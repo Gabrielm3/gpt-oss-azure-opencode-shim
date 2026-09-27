@@ -1,6 +1,6 @@
 # gpt-oss-azure-opencode-shim
 
-> A local HTTP shim for **Azure-hosted GPT-OSS models**. It rewrites the forced `tool_choice` values that Azure AI Foundry rejects, turns answers that miss the required tool call back into that tool call, reports what it did on every request, and keeps the API key out of the client configuration.
+> A local HTTP shim for **Azure-hosted GPT-OSS models**. It rewrites the forced `tool_choice` values that Azure AI Foundry rejects, turns answers that miss the required tool call back into that tool call, reports what it did on every request, and keeps Azure credentials (API key or Entra ID token) out of the client configuration.
 
 [![PyPI](https://img.shields.io/pypi/v/gpt-oss-azure-opencode-shim.svg)](https://pypi.org/project/gpt-oss-azure-opencode-shim/)
 [![CI](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/actions/workflows/ci.yml/badge.svg)](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/actions/workflows/ci.yml)
@@ -199,7 +199,7 @@ The script exits with a non-zero status if any check fails, including authentica
                             │
                             ├── reject browser and non-local requests
                             ├── rewrite forced tool_choice → "auto"
-                            ├── inject the API key
+                            ├── inject API key or Entra ID token
                             ├── forced requests: check answer, repair tool call
                             ├── relay response, headers, and SSE stream
                             └── x-shim-outcome header + /metrics
@@ -419,7 +419,7 @@ python -m evals.tool_choice_eval \
 
 ## Security
 
-The shim adds a real API key to every request it forwards and has no inbound authentication. It is built for a single local user:
+The shim adds your Azure credentials (an API key or an Entra ID bearer token) to every request it forwards and has no inbound authentication. It is built for a single local user:
 
 - It binds to `127.0.0.1` by default and logs a warning if `SHIM_HOST` is not a loopback address.
 - It returns HTTP 403 for requests with an `Origin` header or a `Sec-Fetch-Site` value other than `none`. Web pages cannot use the shim through cross-site requests.
