@@ -1,6 +1,6 @@
 # gpt-oss-azure-opencode-shim
 
-> A local HTTP shim for **Azure-hosted GPT-OSS models**. It rewrites the forced `tool_choice` values that Azure AI Foundry rejects, turns answers that miss the required tool call back into that tool call, reports what it did on every request, and keeps the API key out of the client configuration.
+> A local HTTP shim for **Azure-hosted GPT-OSS models**. It rewrites the forced `tool_choice` values that Azure AI Foundry rejects, turns answers that miss the required tool call back into that tool call, reports what it did on every request, and keeps Azure credentials (API key or Entra ID token) out of the client configuration.
 
 [![PyPI](https://img.shields.io/pypi/v/gpt-oss-azure-opencode-shim.svg)](https://pypi.org/project/gpt-oss-azure-opencode-shim/)
 [![CI](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/actions/workflows/ci.yml/badge.svg)](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/actions/workflows/ci.yml)
@@ -19,7 +19,7 @@ Azure AI Foundry deployments of `gpt-oss-120b` do not support a forced tool choi
 | Same request with `stream: true` | HTTP 200 stream with one error event: `DFLASH speculative decoding does not support grammar-constrained decoding yet.` |
 | `tool_choice: "required"` | HTTP 400 `UnsupportedToolUse` |
 
-OpenCode sends `tool_choice: "required"` for structured output (`format: {"type": "json_schema"}`), and other clients force a function to get a guaranteed tool call. The shim rewrites every `tool_choice` other than `"auto"` or `"none"` to `"auto"` before the request reaches Azure.
+OpenCode sends `tool_choice: "required"` for structured output (`format: {"type": "json_schema"}`), and other clients force a function to get a guaranteed tool call. For gpt-oss models, the shim rewrites every `tool_choice` other than `"auto"` or `"none"` to `"auto"` before the request reaches Azure. Requests for other models pass through unchanged.
 
 With `"auto"`, the model sometimes does the work but misses the tool call: it writes the answer as JSON text, or leaks the call's arguments into its reasoning and returns an empty turn. For forced requests, the shim checks the answer against the tool schemas and returns the tool call when exactly one tool matches.
 
@@ -69,7 +69,7 @@ uv tool install gpt-oss-azure-opencode-shim
 # or: pipx install gpt-oss-azure-opencode-shim
 ```
 
-Both put the `gpt-oss-azure-opencode-shim` and `gpt-oss-azure-opencode-shim-report` commands in `~/.local/bin`. Add the `[otel]` extra for OpenTelemetry (`uv tool install 'gpt-oss-azure-opencode-shim[otel]'`). To try it without installing, run `uvx gpt-oss-azure-opencode-shim --help`.
+Both put the `gpt-oss-azure-opencode-shim` and `gpt-oss-azure-opencode-shim-report` commands in `~/.local/bin`. Add the `[entra]` extra for keyless Entra ID auth and the `[otel]` extra for OpenTelemetry (`uv tool install 'gpt-oss-azure-opencode-shim[entra,otel]'`). To try it without installing, run `uvx gpt-oss-azure-opencode-shim --help`.
 
 **2. Configure**
 
@@ -82,6 +82,8 @@ UPSTREAM_URL=https://YOUR_RESOURCE.services.ai.azure.com/openai
 AZURE_FOUNDRY_API_KEY=your-key-here
 EOF
 ```
+
+For keyless auth, install the `[entra]` extra, run `az login`, and replace the `AZURE_FOUNDRY_API_KEY` line with `AZURE_TOKEN_CREDENTIALS=AzureCliCredential` (see [Credentials](#4-credentials)).
 
 **3. Run as a systemd user service**
 
@@ -115,7 +117,7 @@ docker run -d --name gpt-oss-shim --restart unless-stopped \
   -p 127.0.0.1:9526:9526 \
   --env-file ~/.config/gpt-oss-azure-opencode-shim.env \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
-  ghcr.io/gabrielm3/gpt-oss-azure-opencode-shim:0.6
+  ghcr.io/gabrielm3/gpt-oss-azure-opencode-shim:0.7
 ```
 
 **Keep `127.0.0.1:` in `-p`.** Inside the container the shim listens on all interfaces (hence the startup warning), so the port mapping is what keeps it local. `-p 9526:9526` would let any machine on your network send requests that the shim signs with your Azure credentials. Don't set `SHIM_HOST` in the env file for Docker. When another container calls the shim by service name (say `http://shim:9526` in Compose), add that name to `SHIM_ALLOWED_HOSTS`.
@@ -123,7 +125,7 @@ docker run -d --name gpt-oss-shim --restart unless-stopped \
 The image is multi-arch (amd64, arm64), distroless (no shell), runs as a non-root user and holds the same wheel as the PyPI release, with the `otel` and `entra` extras. Without an API key it uses Entra ID; the image has no `az` CLI, so run it where a managed identity or workload identity provides the token. On a workstation, use the PyPI install with `az login` instead. Each release carries an SBOM, build provenance and a signed attestation:
 
 ```bash
-gh attestation verify oci://ghcr.io/gabrielm3/gpt-oss-azure-opencode-shim:0.6 --owner Gabrielm3
+gh attestation verify oci://ghcr.io/gabrielm3/gpt-oss-azure-opencode-shim:0.7 --owner Gabrielm3
 ```
 
 **4. Point OpenCode at the shim**
@@ -152,13 +154,13 @@ Add to `~/.config/opencode/opencode.json` (or merge with existing — see [`exam
 }
 ```
 
-The `apiKey` value is a placeholder. The shim replaces it with the real key.
+The `apiKey` value is a placeholder. The shim replaces it with your Azure credentials.
 
 ---
 
 ## Verify the Fix
 
-[`examples/curl-tests.sh`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/examples/curl-tests.sh) reproduces each Azure response and checks the shim against the real deployment:
+[`examples/curl-tests.sh`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/examples/curl-tests.sh) reproduces each Azure response and checks the shim against the real deployment. It calls Azure directly with an API key, so the resource needs key auth enabled:
 
 ```bash
 export UPSTREAM_URL=https://YOUR_RESOURCE.services.ai.azure.com/openai
@@ -198,8 +200,8 @@ The script exits with a non-zero status if any check fails, including authentica
 └──────────┘         └────────────────┘         └──────────────────┘
                             │
                             ├── reject browser and non-local requests
-                            ├── rewrite forced tool_choice → "auto"
-                            ├── inject the API key
+                            ├── gpt-oss models: rewrite forced tool_choice → "auto"
+                            ├── inject API key or Entra ID token
                             ├── forced requests: check answer, repair tool call
                             ├── relay response, headers, and SSE stream
                             └── x-shim-outcome header + /metrics
@@ -207,7 +209,7 @@ The script exits with a non-zero status if any check fails, including authentica
 
 ### 1. Tool choice rewriting
 
-For `POST .../chat/completions`, any `tool_choice` other than `"auto"` or `"none"` becomes `"auto"`. Each rewrite is logged:
+For `POST .../chat/completions` to a gpt-oss model, any `tool_choice` other than `"auto"` or `"none"` becomes `"auto"`. Each rewrite is logged:
 
 ```text
 INFO gpt_oss_shim: sanitized request: tool_choice='required' -> 'auto'
@@ -276,13 +278,13 @@ Azure sends `usage` at the end of a stream without `stream_options`, so the shim
 
 ### 4. Credentials
 
-The client sends a placeholder key. The shim sends the real key as both `api-key` and `Authorization: Bearer` (Azure accepts either). The key lives only in the shim's environment file, which the Quick Start and `install.sh` create with mode `600`.
+The client sends a placeholder key. With an API key configured, the shim sends it as both `api-key` and `Authorization: Bearer` (Azure accepts either). The key lives only in the shim's environment file, which the Quick Start and `install.sh` create with mode `600`.
 
 **Keyless (Entra ID).** Leave `AZURE_FOUNDRY_API_KEY` unset and install the `[entra]` extra (`uv tool install 'gpt-oss-azure-opencode-shim[entra]'`). The shim then sends an Entra ID bearer token from `DefaultAzureCredential`: an `az login` session, a managed identity, or workload identity federation in CI. Tokens are cached and refreshed 5 minutes before they expire; if that refresh fails, the current token is used until it expires. With `az login` only, set `AZURE_TOKEN_CREDENTIALS=AzureCliCredential` so the credential skips the managed-identity probe: the first request on a laptop or WSL drops from about 4.7 s to 2 s. Your identity needs a data-plane role on the resource, such as `Cognitive Services OpenAI User` or `Foundry User`. If no token can be obtained (for example, an expired `az login`), the request fails with HTTP 502 `upstream_auth_error`, is counted as `upstream_error` in `/metrics`, and the cause is logged. With Entra ID, the resource can run with key auth disabled (`disableLocalAuth`).
 
 ### 5. Header hygiene
 
-The shim sets its own `Content-Type` and drops the client's copy, plus `Authorization`, `Accept-Encoding`, and hop-by-hop headers. Azure rejects a duplicated `Content-Type` (`application/json,application/json`) with HTTP 400.
+The shim sets its own `Content-Type` and drops the client's copy, plus `Authorization`, `api-key`, `Accept-Encoding`, and hop-by-hop headers. Azure rejects a duplicated `Content-Type` (`application/json,application/json`) with HTTP 400.
 
 ### 6. Upstream failures
 
@@ -345,7 +347,7 @@ The fixtures in `tests/fixtures/polyfill/` were recorded this way from `gpt-oss-
 
 ---
 
-### Dashboard, SLOs and alerts
+## Dashboard, SLOs and alerts
 
 `observability/` holds a local Prometheus and Grafana stack, with the dashboard, recording rules and alerts versioned as code:
 
@@ -367,6 +369,8 @@ Both containers use the host network and listen on 127.0.0.1, because the shim a
 | `ShimDown` | Prometheus cannot scrape `/metrics` for 5 min |
 
 The burn-rate pairs follow the multiwindow pattern from the Google SRE workbook. `observability/prometheus/rules.test.yml` runs every alert against synthetic series with `promtool test rules` in CI. The tests use the exact metric names the shim exports, so a rename fails the build. The stack has no Alertmanager: alerts show up on the Prometheus alerts page. To route them, add an Alertmanager with your receiver.
+
+---
 
 ## Evaluation
 
@@ -419,7 +423,7 @@ python -m evals.tool_choice_eval \
 
 ## Security
 
-The shim adds a real API key to every request it forwards and has no inbound authentication. It is built for a single local user:
+The shim adds your Azure credentials (an API key or an Entra ID bearer token) to every request it forwards and has no inbound authentication. It is built for a single local user:
 
 - It binds to `127.0.0.1` by default and logs a warning if `SHIM_HOST` is not a loopback address.
 - It returns HTTP 403 for requests with an `Origin` header or a `Sec-Fetch-Site` value other than `none`. Web pages cannot use the shim through cross-site requests.
@@ -435,6 +439,7 @@ Do not expose the shim on a network interface. The `Host` check does not stop a 
 | ----------------------- | -------- | ----------- | ---------------------------------------------------- |
 | `UPSTREAM_URL`          | yes      | —           | Azure Foundry base URL (no `/v1`)                    |
 | `AZURE_FOUNDRY_API_KEY` | no       | —           | Azure resource key; unset = Entra ID (`[entra]`)     |
+| `AZURE_TOKEN_CREDENTIALS` | no   | —           | Read by `azure-identity`; `AzureCliCredential` skips the managed-identity probe |
 | `SHIM_HOST`             | no       | `127.0.0.1` | Bind address                                         |
 | `SHIM_PORT`             | no       | `9526`      | Bind port                                            |
 | `SHIM_LOG_LEVEL`        | no       | `info`      | Log level for the shim and uvicorn                   |
@@ -455,7 +460,7 @@ Do not expose the shim on a network interface. The `Host` check does not stop a 
 
 | Component     | Tested Version                    |
 | ------------- | --------------------------------- |
-| Python        | 3.10, 3.11, 3.12, 3.13            |
+| Python        | 3.10, 3.11, 3.12, 3.13, 3.14      |
 | OpenCode      | 1.18.31                           |
 | Azure GPT-OSS | `gpt-oss-120b` (Chat Completions) |
 | OS            | Linux (systemd user service)      |

@@ -11,18 +11,18 @@ Please report vulnerabilities privately through GitHub:
 (<https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/security/advisories/new>).
 Do not open a public issue.
 
-Include the version, your configuration (without the API key), and steps to
-reproduce. The maintainer aims to reply within 7 days.
+Include the version, your configuration (without the API key or tokens), and
+steps to reproduce. The maintainer aims to reply within 7 days.
 
 ## Scope
 
-The shim holds an Azure API key and adds it to every request it forwards, so
-these are in scope:
+The shim holds Azure credentials (an API key or an Entra ID token) and adds
+them to every request it forwards, so these are in scope:
 
 - Any way for a non-local client to reach the shim or make it forward a request
   (Host checks, browser requests, DNS rebinding).
-- Leaking the API key or the upstream host through responses, logs, metrics,
-  traces or OpenTelemetry spans.
+- Leaking the API key, the Entra ID token or the upstream host through
+  responses, logs, metrics, traces or OpenTelemetry spans.
 - Recorded traces or outcome logs containing prompt content.
 
 Binding the shim to a non-loopback address (`SHIM_HOST`) removes the local-only
