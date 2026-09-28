@@ -31,6 +31,8 @@ Measured against the real deployment (see [Evaluation](#evaluation)):
 
 On the 15-scenario synthetic set the polyfill cut stalled turns from 12% to 4% on 2026-09-22, but a rerun on 2026-09-23 found both arms equal within noise (5% and 7%). The structured-output gain is the one that holds.
 
+The Azure resources behind the shim are managed as code with OpenTofu (Terraform-compatible), with encrypted remote state and nightly drift detection. See [Infrastructure as Code](#infrastructure-as-code).
+
 Every claim in this README is backed by real requests recorded in [`docs/PROBLEM.md`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/docs/PROBLEM.md).
 
 ---
@@ -369,6 +371,20 @@ Both containers use the host network and listen on 127.0.0.1, because the shim a
 | `ShimDown` | Prometheus cannot scrape `/metrics` for 5 min |
 
 The burn-rate pairs follow the multiwindow pattern from the Google SRE workbook. `observability/prometheus/rules.test.yml` runs every alert against synthetic series with `promtool test rules` in CI. The tests use the exact metric names the shim exports, so a rename fails the build. The stack has no Alertmanager: alerts show up on the Prometheus alerts page. To route them, add an Alertmanager with your receiver.
+
+---
+
+## Infrastructure as Code
+
+`infra/` manages the Azure resources behind the shim with OpenTofu (Terraform-compatible HCL, `azurerm` provider): the AI Services account, the `gpt-oss-120b` deployment and a subscription budget with alerts.
+
+- **Adopted, not recreated.** Both resources existed before the code and were brought in with `import {}` blocks. Recreating the account would change the endpoint and the keys. Both have `prevent_destroy`.
+- **Encrypted remote state.** State lives in Azure Blob Storage with Entra ID auth only (shared-key access disabled). OpenTofu's client-side state encryption (AES-GCM, enforced for state and plan) protects the account's keys in state.
+- **Nightly drift detection.** [`infra-drift.yml`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/.github/workflows/infra-drift.yml) runs `tofu plan` against the live account with a least-privilege identity federated over OIDC (no stored secrets) and fails when the code and Azure disagree. The full plan never reaches the public Actions log.
+- **Model upgrades go through a PR.** The deployment uses `version_upgrade_option = "NoAutoUpgrade"`, and the [live eval](#evaluation) checks that behavior did not regress.
+- **Cost guardrail as code.** The budget alerts at 20%, 50%, 80% and 100% of the credit, plus a forecast alert.
+
+Bootstrap, CI identities and day-to-day commands: [`infra/README.md`](https://github.com/Gabrielm3/gpt-oss-azure-opencode-shim/blob/master/infra/README.md).
 
 ---
 
